@@ -37,7 +37,7 @@ FPS           = 60
 PADDLE_W      = 100
 PADDLE_H      = 14
 PADDLE_Y      = H - 50
-PADDLE_SPEED  = 420        # pixels/sec at full velocity
+PADDLE_SPEED  = 560        # pixels/sec at full velocity
 
 BALL_R        = 9
 BALL_SPEED    = 340        # pixels/sec initial
@@ -385,6 +385,11 @@ class BricksGame:
             self._update_paddle_intent(dt, gs)
         else:
             velocity = gs.paddle_velocity if gs else 0.0
+            # Non-linear curve: |v|^0.65 expands mid-range so a moderate
+            # tilt (~0.4g) gives ~60% speed rather than 40% — feels more
+            # immediate without changing the gesture interpreter.
+            if velocity != 0.0:
+                velocity = math.copysign(abs(velocity) ** 0.65, velocity)
             dx = velocity * self._paddle_spd * dt
             self._paddle.x += int(dx)
         self._paddle.x = max(0, min(self._W - self._paddle.width, self._paddle.x))

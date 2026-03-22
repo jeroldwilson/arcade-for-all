@@ -34,7 +34,7 @@ CARD_BG    = (30,  30,  52)
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
 # Base game list (calibration appended dynamically when sensor is connected)
-GAMES = ["bricks", "snake"]
+GAMES = ["bricks", "snake", "fruit_ninja"]
 
 GAME_META = {
     "bricks": {
@@ -48,6 +48,12 @@ GAME_META = {
         "desc":    ["Eat food, grow longer!", "Tilt wrist to steer.", "Avoid walls and yourself."],
         "desc_ac": ["Eat food, grow longer!", "Move wrist — snake finds the way!", "Walls wrap, no game over!"],
         "accent":  (100, 240, 120),
+    },
+    "fruit_ninja": {
+        "title":   "FRUIT SLICE",
+        "desc":    ["Slice flying fruits!", "Tilt & flick to swing blade.", "60 seconds, beat your score!"],
+        "desc_ac": ["Slice flying fruits!", "Any movement slices!", "Move and have fun!"],
+        "accent":  (255, 140, 60),
     },
     "calibration": {
         "title":   "CALIBRATE",
@@ -386,6 +392,8 @@ class HomeScreen:
             self._draw_bricks_preview(area, dim)
         elif game_id == "snake":
             self._draw_snake_preview(area, dim)
+        elif game_id == "fruit_ninja":
+            self._draw_fruit_ninja_preview(area, dim)
         elif game_id == "calibration":
             self._draw_calibration_preview(area, dim)
 
@@ -465,6 +473,50 @@ class HomeScreen:
         pygame.draw.ellipse(self._screen, (min(255, int(55 * alpha / 255)), min(255, int(175 * alpha / 255)), 50),
                             pygame.Rect(fcx + max(1, int(1 * sc)), fcy - max(4, int(8 * sc)),
                                         max(2, int(4 * sc)), max(1, int(2 * sc))))
+
+    def _draw_fruit_ninja_preview(self, area: pygame.Rect, dim: int) -> None:
+        """Colorful fruits with a diagonal slice trail."""
+        import math
+        sc = self._sc
+
+        # Fruit data: (cx_frac, cy_frac, color, inner, r)
+        fruits = [
+            (0.22, 0.55, (215,  50,  50), (160, 25, 25),  0.13),   # apple
+            (0.50, 0.38, ( 60, 175,  60), (210, 55, 55),  0.17),   # watermelon
+            (0.78, 0.52, (240, 150,  30), (200,110, 20),  0.13),   # orange
+            (0.38, 0.70, (210,  55,  85), (255,190,180),  0.10),   # strawberry
+            (0.65, 0.65, (245, 220,  55), (200,165, 25),  0.12),   # banana
+        ]
+
+        fade = dim / 255.0
+        for fx, fy, clr, inner_clr, r_frac in fruits:
+            cx  = int(area.left + fx * area.width)
+            cy  = int(area.top  + fy * area.height)
+            r   = max(4, int(r_frac * min(area.width, area.height)))
+            c   = tuple(min(255, int(v * fade)) for v in clr)
+            ic  = tuple(min(255, int(v * fade)) for v in inner_clr)
+            pygame.draw.circle(self._screen, c,  (cx, cy), r)
+            pygame.draw.circle(self._screen, ic, (cx, cy), max(2, r // 2))
+            # Highlight
+            hl  = tuple(min(255, int((v + 80) * fade)) for v in clr)
+            pygame.draw.circle(self._screen, hl, (cx - r // 3, cy - r // 3),
+                               max(1, r // 3))
+
+        # Diagonal slice trail
+        trail_alpha = int(170 * fade)
+        trail_clr   = (min(255, trail_alpha + 20), min(255, trail_alpha), 255)
+        x0 = area.left  + int(area.width  * 0.15)
+        y0 = area.top   + int(area.height * 0.75)
+        x1 = area.left  + int(area.width  * 0.88)
+        y1 = area.top   + int(area.height * 0.22)
+        lw = max(1, int(2 * sc))
+        pygame.draw.line(self._screen, trail_clr, (x0, y0), (x1, y1), lw)
+        # Small glow dots along trail
+        for t in (0.3, 0.55, 0.80):
+            tx = int(x0 + (x1 - x0) * t)
+            ty = int(y0 + (y1 - y0) * t)
+            pygame.draw.circle(self._screen, trail_clr,
+                               (tx, ty), max(2, int(3 * sc)))
 
     def _draw_calibration_preview(self, area: pygame.Rect, dim: int) -> None:
         """Mini compass + top-down airplane preview for the calibration card."""

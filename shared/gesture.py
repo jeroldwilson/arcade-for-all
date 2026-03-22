@@ -50,7 +50,8 @@ class GestureConfig:
     tilt_max: float = 0.5
 
     # Gyroscope flick threshold (°/s) to trigger a LAUNCH event.
-    flick_threshold: float = 300.0
+    # 200°/s catches a firm-but-normal wrist flick; 300 was too high in practice.
+    flick_threshold: float = 200.0
 
     # Low-pass smoothing factor for gravity extraction [0–1].
     # Lower = heavier filtering = slower response but motion-noise immune.
@@ -58,13 +59,14 @@ class GestureConfig:
     alpha: float = 0.05
 
     # Number of samples in the rolling window used for flick detection.
-    flick_window: int = 8
+    # 6 samples = 60ms at 100Hz — catches shorter/sharper flicks (was 80ms).
+    flick_window: int = 6
 
     # Dead-zone for gyro twist (°/s).
     twist_dead_zone: float = 30.0
 
     # Time (s) between repeated LAUNCH events to prevent accidental double-fire.
-    launch_cooldown: float = 0.5
+    launch_cooldown: float = 0.4
 
     # Samples collected for auto-calibration (≈1 s at 100 Hz).
     # Keep sensor still during this period.

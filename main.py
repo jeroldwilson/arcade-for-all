@@ -246,8 +246,9 @@ def main() -> None:
 
     # ── Main selection loop ────────────────────────────────────────────────
     from home import HomeScreen
-    from games.bricks.game import BricksGame
-    from games.snake.game  import SnakeGame
+    from games.bricks.game      import BricksGame
+    from games.snake.game       import SnakeGame
+    from games.fruit_ninja.game import FruitNinjaGame
 
     home = HomeScreen(screen, clock, mode=mode)
 
@@ -271,6 +272,10 @@ def main() -> None:
 
             elif selected == "snake":
                 game = SnakeGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
+                game.run(gesture_src)   # returns "home"
+
+            elif selected == "fruit_ninja":
+                game = FruitNinjaGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
                 game.run(gesture_src)   # returns "home"
 
             elif selected == "calibration":
