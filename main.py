@@ -244,13 +244,17 @@ def main() -> None:
     from shared.audio import make_audio_manager
     audio = make_audio_manager()
 
+    # ── Username prompt ────────────────────────────────────────────────────
+    from shared.username_screen import UsernameScreen
+    username = UsernameScreen(screen, clock).run()
+
     # ── Main selection loop ────────────────────────────────────────────────
     from home import HomeScreen
     from games.bricks.game      import BricksGame
     from games.snake.game       import SnakeGame
     from games.fruit_ninja.game import FruitNinjaGame
 
-    home = HomeScreen(screen, clock, mode=mode)
+    home = HomeScreen(screen, clock, mode=mode, username=username)
 
     try:
         while True:
@@ -267,20 +271,24 @@ def main() -> None:
             cur = pygame.display.get_surface()
 
             if selected == "bricks":
-                game = BricksGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
+                game = BricksGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                                  username=username)
                 game.run(gesture_src)   # returns "home"
 
             elif selected == "snake":
-                game = SnakeGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
+                game = SnakeGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                                 username=username)
                 game.run(gesture_src)   # returns "home"
 
             elif selected == "fruit_ninja":
-                game = FruitNinjaGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
+                game = FruitNinjaGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                                      username=username)
                 game.run(gesture_src)   # returns "home"
 
             elif selected == "calibration":
                 from games.calibration.game import CalibrationGame
-                game = CalibrationGame(cur, clock, debug=args.debug, mode=mode, audio=audio)
+                game = CalibrationGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                                       username=username)
                 game.run(gesture_src)   # returns "home"
 
     except KeyboardInterrupt:

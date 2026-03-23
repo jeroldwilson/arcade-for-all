@@ -2,45 +2,97 @@
 audio.py — Procedural audio for MetaMotion Arcade
 
 All sounds are generated from numpy arrays at runtime (no external files).
-Background melody: gentle C-major pentatonic arpeggio that loops seamlessly.
-Collect sound: short ascending chime played each time a fruit/brick is collected.
+
+Background music: upbeat kids-friendly adventure theme, 120 BPM, C major.
+  • Four 4-bar phrases that loop seamlessly (~16 s loop).
+  • Melody uses a bright square-wave timbre (odd harmonics) — classic game sound.
+  • Bass line uses a warm triangle-wave timbre.
+  • Tracks are mixed at safe levels to avoid clipping.
+
+Collect sound: bright rising chime played when a fruit / brick is collected.
 """
 
 import numpy as np
 import pygame
 
+_PI2 = 2.0 * np.pi
 
 # ── Note table (Hz) ───────────────────────────────────────────────────────────
 
 NOTES = {
-    'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'G4': 392.00, 'A4': 440.00,
-    'C5': 523.25, 'D5': 587.33, 'E5': 659.25, 'G5': 783.99, 'A5': 880.00,
+    # Bass register
+    'C3':  130.81, 'E3':  164.81, 'F3':  174.61,
+    'G3':  196.00, 'A3':  220.00, 'B3':  246.94,
+    # Mid register
+    'C4':  261.63, 'D4':  293.66, 'E4':  329.63,
+    'F4':  349.23, 'G4':  392.00, 'A4':  440.00, 'B4':  493.88,
+    # High register
+    'C5':  523.25, 'D5':  587.33, 'E5':  659.25,
+    'F5':  698.46, 'G5':  783.99, 'A5':  880.00, 'B5':  987.77,
     'C6': 1046.50,
+    # Rest
+    'R':     0.0,
 }
 
-# Four distinct phrases in C pentatonic that create a 32-note, ~18 s loop.
+# ── 120 BPM note-length constants (seconds) ───────────────────────────────────
+_Q  = 0.500   # quarter note
+_E  = 0.250   # eighth note
+_H  = 1.000   # half note
+_DE = 0.375   # dotted eighth
+
+
+# ── Upbeat kids-friendly melody (4 phrases × 4 bars) ─────────────────────────
 #
-# Phrase A  — gentle ascending arpeggio (low register)
-# Phrase B  — descending walk with a rhythmic pause
-# Phrase C  — playful upper-register run
-# Phrase D  — slow, wide-interval resolution back to root
+# Each phrase is exactly 4.0 s at 120 BPM (8 quarter-note beats).
+#
+# Phrase A  — bright opening hook
+# Phrase B  — playful bouncing response
+# Phrase C  — energy build-up to the high register
+# Phrase D  — triumphant resolution back to root
 #
 _MELODY = [
-    # ── Phrase A: ascending arpeggio ──────────────────────────────────────
-    ('C4', 0.35), ('E4', 0.35), ('G4', 0.35), ('A4', 0.35),
-    ('C5', 0.35), ('A4', 0.35), ('G4', 0.35), ('E4', 0.35),
+    # ── Phrase A: catchy opening hook ─────────────────────────────────────────
+    ('E5', _E), ('G5', _E), ('A5', _E), ('G5', _E),
+    ('E5', _Q), ('C5', _Q),
+    ('D5', _E), ('E5', _E), ('D5', _E), ('C5', _E),
+    ('C5', _H),
 
-    # ── Phrase B: descending walk with a rhythmic skip ────────────────────
-    ('A4', 0.28), ('G4', 0.28), ('E4', 0.28), ('D4', 0.28),
-    ('C4', 0.42), ('D4', 0.28), ('E4', 0.28), ('C4', 0.42),
+    # ── Phrase B: playful bounce ───────────────────────────────────────────────
+    ('G4', _E), ('A4', _E), ('C5', _E), ('E5', _E),
+    ('D5', _E), ('C5', _E), ('D5', _Q),
+    ('E5', _E), ('D5', _E), ('C5', _E), ('A4', _E),
+    ('C5', _H),
 
-    # ── Phrase C: upper-register playful run ──────────────────────────────
-    ('E5', 0.22), ('G5', 0.22), ('A5', 0.22), ('G5', 0.22),
-    ('E5', 0.22), ('D5', 0.22), ('C5', 0.44), ('G4', 0.44),
+    # ── Phrase C: energy climb ─────────────────────────────────────────────────
+    ('C5', _E), ('E5', _E), ('G5', _E), ('A5', _E),
+    ('G5', _Q), ('E5', _Q),
+    ('A5', _E), ('G5', _E), ('E5', _E), ('D5', _E),
+    ('E5', _H),
 
-    # ── Phrase D: slow, wide-interval resolution ──────────────────────────
-    ('C4', 0.55), ('G4', 0.55), ('E4', 0.55), ('A4', 0.55),
-    ('G4', 0.45), ('E4', 0.35), ('D4', 0.35), ('C4', 0.55),
+    # ── Phrase D: triumphant resolution ───────────────────────────────────────
+    ('G5', _E), ('E5', _E), ('G5', _E), ('A5', _E),
+    ('G5', _Q), ('E5', _Q),
+    ('D5', _E), ('E5', _E), ('D5', _E), ('C5', _E),
+    ('C5', _H),
+]
+
+# ── Bass line — one note per quarter beat, same total duration as melody ───────
+_BASS = [
+    # Phrase A (8 quarter beats = 4.0 s)
+    ('C3', _Q), ('C3', _Q), ('G3', _Q), ('G3', _Q),
+    ('F3', _Q), ('F3', _Q), ('G3', _Q), ('G3', _Q),
+
+    # Phrase B
+    ('C3', _Q), ('C3', _Q), ('F3', _Q), ('G3', _Q),
+    ('C3', _Q), ('G3', _Q), ('C3', _H),
+
+    # Phrase C
+    ('C3', _Q), ('E3', _Q), ('G3', _Q), ('A3', _Q),
+    ('F3', _Q), ('F3', _Q), ('G3', _Q), ('G3', _Q),
+
+    # Phrase D
+    ('C3', _Q), ('G3', _Q), ('C3', _Q), ('G3', _Q),
+    ('F3', _Q), ('G3', _Q), ('C3', _H),
 ]
 
 
@@ -48,9 +100,13 @@ _MELODY = [
 
 class AudioManager:
     """
-    Creates background music and a collect sound from numpy arrays.
-    Call start_background() when a game begins and stop_background() on exit.
-    Call play_collect() each time the player scores (fruit eaten, brick broken).
+    Procedural music and sound effects for MetaMotion Arcade.
+
+    Public API
+    ──────────
+      start_background()   — loop the gameplay music
+      stop_background()    — stop music (e.g. on home screen)
+      play_collect()       — play fruit/brick-collect chime
     """
 
     def __init__(self) -> None:
@@ -58,43 +114,103 @@ class AudioManager:
         if not info:
             pygame.mixer.init(44100, -16, 2, 512)
             info = pygame.mixer.get_init()
-        self._rate  = info[0]   # sample rate (Hz)
-        self._chans = info[2]   # 1=mono, 2=stereo
+        self._rate  = info[0]
+        self._chans = info[2]
 
         self._bg_sound      = self._to_sound(self._build_bg_loop())
         self._collect_sound = self._to_sound(self._build_collect())
 
-        self._bg_sound.set_volume(0.22)
-        self._collect_sound.set_volume(0.65)
+        self._bg_sound.set_volume(0.30)
+        self._collect_sound.set_volume(0.70)
 
-    # ── Sound generation ──────────────────────────────────────────────────────
+    # ── Wave generators ───────────────────────────────────────────────────────
 
-    def _tone(self, freq: float, dur: float, amp: float = 0.18) -> np.ndarray:
-        """Sine + 2nd harmonic with ADSR envelope, returned as int16 mono."""
+    def _square_tone(self, freq: float, dur: float, amp: float = 0.14) -> np.ndarray:
+        """
+        Bright square-wave-ish tone built from odd harmonics.
+        Great for melodic leads — sounds like classic 8-bit game music.
+        """
+        if freq <= 0 or dur <= 0:
+            return np.zeros(max(1, int(self._rate * dur)), dtype=np.int16)
         n = int(self._rate * dur)
         t = np.linspace(0, dur, n, endpoint=False)
-        wave = amp * (np.sin(2 * np.pi * freq * t)
-                      + 0.28 * np.sin(4 * np.pi * freq * t))
-        env = np.ones(n, dtype=np.float32)
-        att = max(1, int(n * 0.08))
-        rel = max(1, int(n * 0.30))
+        # Odd harmonic series approximates a square wave
+        wave = (
+            np.sin(_PI2 * freq       * t)
+          + 0.333 * np.sin(_PI2 * freq * 3 * t)   # 3rd harmonic
+          + 0.200 * np.sin(_PI2 * freq * 5 * t)   # 5th harmonic
+          + 0.143 * np.sin(_PI2 * freq * 7 * t)   # 7th harmonic
+        )
+        wave *= amp / 1.676   # normalise sum of amplitudes
+        # Snappy ADSR: very fast attack, gentle release (preserves rhythm)
+        env  = np.ones(n, dtype=np.float32)
+        att  = max(1, int(n * 0.03))
+        rel  = max(1, int(n * 0.28))
         env[:att]  = np.linspace(0.0, 1.0, att)
         env[-rel:] = np.linspace(1.0, 0.0, rel)
         return (wave * env * 32767).clip(-32767, 32767).astype(np.int16)
 
+    def _triangle_tone(self, freq: float, dur: float, amp: float = 0.16) -> np.ndarray:
+        """
+        Warm triangle-wave tone (mellow, great for bass).
+        Triangle wave = odd harmonics with amplitude ∝ 1/n².
+        """
+        if freq <= 0 or dur <= 0:
+            return np.zeros(max(1, int(self._rate * dur)), dtype=np.int16)
+        n = int(self._rate * dur)
+        t = np.linspace(0, dur, n, endpoint=False)
+        wave = (
+            np.sin(_PI2 * freq       * t)
+          - 0.111 * np.sin(_PI2 * freq * 3 * t)   # 3rd (negative for triangle shape)
+          + 0.040 * np.sin(_PI2 * freq * 5 * t)
+          - 0.020 * np.sin(_PI2 * freq * 7 * t)
+        )
+        wave *= amp / 1.171
+        env  = np.ones(n, dtype=np.float32)
+        att  = max(1, int(n * 0.02))
+        rel  = max(1, int(n * 0.40))   # longer release for warmth
+        env[:att]  = np.linspace(0.0, 1.0, att)
+        env[-rel:] = np.linspace(1.0, 0.0, rel)
+        return (wave * env * 32767).clip(-32767, 32767).astype(np.int16)
+
+    # ── Track builders ────────────────────────────────────────────────────────
+
+    def _build_melody_track(self) -> np.ndarray:
+        parts = [self._square_tone(NOTES[n], d, amp=0.13) for n, d in _MELODY]
+        return np.concatenate(parts).astype(np.float32)
+
+    def _build_bass_track(self) -> np.ndarray:
+        parts = [self._triangle_tone(NOTES[n], d, amp=0.14) for n, d in _BASS]
+        arr   = np.concatenate(parts).astype(np.float32)
+        # Pad or trim so bass matches melody length exactly
+        mel_len = sum(int(self._rate * d) for _, d in _MELODY)
+        if len(arr) < mel_len:
+            arr = np.concatenate([arr, np.zeros(mel_len - len(arr), dtype=np.float32)])
+        else:
+            arr = arr[:mel_len]
+        return arr
+
     def _build_bg_loop(self) -> np.ndarray:
-        parts = [self._tone(NOTES[n], d, amp=0.11) for n, d in _MELODY]
-        return np.concatenate(parts)
+        """Mix melody + bass into a single loopable int16 buffer."""
+        mel  = self._build_melody_track()
+        bass = self._build_bass_track()
+        # Mix at balanced levels — melody slightly louder
+        mixed = mel * 0.58 + bass * 0.42
+        # Soft-clip to prevent inter-channel distortion on mix
+        mixed = np.tanh(mixed / 32767) * 32767
+        return mixed.clip(-32767, 32767).astype(np.int16)
 
     def _build_collect(self) -> np.ndarray:
+        """Rising 3-note chime — bright and rewarding."""
         return np.concatenate([
-            self._tone(NOTES['E5'], 0.08, amp=0.28),
-            self._tone(NOTES['G5'], 0.08, amp=0.28),
-            self._tone(NOTES['C6'], 0.18, amp=0.28),
+            self._square_tone(NOTES['E5'], 0.07, amp=0.30),
+            self._square_tone(NOTES['G5'], 0.07, amp=0.30),
+            self._square_tone(NOTES['C6'], 0.20, amp=0.28),
         ])
 
+    # ── pygame.Sound wrapper ──────────────────────────────────────────────────
+
     def _to_sound(self, mono: np.ndarray) -> "pygame.mixer.Sound":
-        """Wrap a mono int16 array into a pygame.Sound (stereo-duplicate if needed)."""
         data = np.column_stack([mono, mono]) if self._chans == 2 else mono
         return pygame.sndarray.make_sound(np.ascontiguousarray(data))
 

@@ -52,14 +52,17 @@ class CalibrationGame:
       [Top View  / Yaw ]     [Sensor Data       ]
     """
 
-    def __init__(self, screen, clock, debug=False, mode="standard", audio=None):
-        self._screen = screen
-        self._clock  = clock
-        self._debug  = debug
-        self._mode   = mode
+    def __init__(self, screen, clock, debug=False, mode="standard", audio=None, username=""):
+        self._screen   = screen
+        self._clock    = clock
+        self._debug    = debug
+        self._mode     = mode
+        self._username = username
 
         self._yaw_deg = 0.0          # integrated from gz
         self._last_gz = 0.0          # for smooth yaw integration
+        self._mode_toast: float = 0.0
+        self._mode_toast_msg: str = ""
 
         self._init_layout()
 
@@ -118,6 +121,9 @@ class CalibrationGame:
                         self._yaw_deg = 0.0
                     elif event.key == pygame.K_f:
                         self._toggle_fullscreen()
+                    elif event.key in (pygame.K_l, pygame.K_t):
+                        self._mode_toast_msg = "Learn / Test mode: open Fruit Slice"
+                        self._mode_toast = 2.5
 
             gs = gesture_src.get_state()
 
@@ -130,6 +136,8 @@ class CalibrationGame:
 
             # Integrate yaw from gz (yaw-rate °/s × dt s)
             self._yaw_deg = (self._yaw_deg + gz * dt) % 360.0
+            if self._mode_toast > 0:
+                self._mode_toast = max(0.0, self._mode_toast - dt)
 
             # Compute pitch and roll from gravity vector
             #   Pitch: positive = nose up (ax shifts negative when tilted forward)
@@ -139,6 +147,13 @@ class CalibrationGame:
 
             self._draw(ax, ay, az, gx, gy, gz,
                        pitch_deg, roll_deg, self._yaw_deg, gs.calibrated)
+            if self._mode_toast > 0:
+                sc    = self._sc
+                alpha = min(255, int(self._mode_toast / 2.5 * 255))
+                ts    = self._font_label.render(self._mode_toast_msg, True, (200, 200, 255))
+                ts.set_alpha(alpha)
+                self._screen.blit(ts, ts.get_rect(
+                    center=(self._W // 2, self._H - max(20, int(24 * sc)))))
             pygame.display.flip()
 
         return "home"

@@ -441,20 +441,53 @@ class FruitNinjaGame:
 
     def __init__(
         self,
-        screen: pygame.Surface,
-        clock:  pygame.time.Clock,
-        debug:  bool = False,
-        mode:   str  = "standard",
+        screen:       pygame.Surface,
+        clock:        pygame.time.Clock,
+        debug:        bool = False,
+        mode:         str  = "standard",
         audio=None,
+        game_submode: str  = "play",   # "play" | "learn" | "test"
+        username:     str  = "",
     ):
-        self._clock  = clock
-        self._mode   = mode
-        self._audio  = audio
-        self._debug  = debug
-        self._gesture_src = None
+        self._clock        = clock
+        self._mode         = mode
+        self._audio        = audio
+        self._debug        = debug
+        self._game_submode = game_submode
+        self._username     = username
+        self._gesture_src  = None
+        self._submode_toast: float = 0.0   # seconds remaining for toast message
+
+        # Gesture learning system — created lazily when learn/test mode is active
+        self._learner = None
+        if game_submode in ("learn", "test"):
+            self._init_learner()
+
         _surf_cache.clear()
         self._init_layout(screen)
         self._reset()
+
+    def _init_learner(self) -> None:
+        """Create the GestureLearningSystem (deferred so it only loads when needed)."""
+        if self._learner is not None:
+            return
+        try:
+            from shared.gesture_learner import GestureLearningSystem
+            self._learner = GestureLearningSystem(username=self._username)
+        except ImportError:
+            print("[fruit_ninja] scikit-learn not installed — learn/test mode disabled.")
+
+    def _switch_submode(self, new_mode: str) -> None:
+        """Switch between play/learn/test submodes at runtime."""
+        if new_mode == self._game_submode:
+            return
+        # Save any pending learn data before switching away
+        if self._learner is not None and self._game_submode in ("learn", "test"):
+            self._learner.save_and_train()
+        self._game_submode = new_mode
+        if new_mode in ("learn", "test"):
+            self._init_learner()
+        self._submode_toast = 2.5
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -498,6 +531,9 @@ class FruitNinjaGame:
             dt = min(self._clock.tick(FPS) / 1000.0, 0.05)
             result = self._handle_events()
             if result:
+                # Save gesture session and retrain model before leaving
+                if self._learner is not None:
+                    self._learner.save_and_train()
                 if self._audio:
                     self._audio.stop_background()
                 return result
@@ -558,6 +594,12 @@ class FruitNinjaGame:
             return "home"
         elif key == pygame.K_r and self._game_over:
             self._reset()
+        elif key == pygame.K_r and not self._game_over:
+            self._switch_submode("play")
+        elif key == pygame.K_l:
+            self._switch_submode("learn")
+        elif key == pygame.K_t:
+            self._switch_submode("test")
         elif key == pygame.K_d:
             self._debug = not self._debug
         elif key == pygame.K_f:
@@ -569,8 +611,15 @@ class FruitNinjaGame:
     def _update(self, dt: float) -> None:
         if self._miss_flash > 0:
             self._miss_flash = max(0.0, self._miss_flash - dt)
+        if self._submode_toast > 0:
+            self._submode_toast = max(0.0, self._submode_toast - dt)
 
         gs = self._gesture_src.get_state() if self._gesture_src else None
+
+        # Feed raw IMU data into the gesture learner buffer every frame
+        if gs is not None and self._learner is not None:
+            self._learner.update(gs)
+
         self._update_blade(dt, gs)
 
         if self._mode == "accessible":
@@ -583,6 +632,16 @@ class FruitNinjaGame:
 
         self._update_spawn(dt)
         self._update_fruits(dt)
+
+        # Learn mode: try to capture a labelled gesture window
+        if gs is not None and self._learner is not None and self._game_submode == "learn":
+            fruits_xy = [(f.x, f.y) for f in self._fruits]
+            self._learner.try_record(
+                gs,
+                (self._blade_x, self._blade_y),
+                fruits_xy,
+            )
+
         self._detect_slices()
         self._update_halves(dt)
         self._update_particles(dt)
@@ -620,8 +679,15 @@ class FruitNinjaGame:
             # Astra uses higher scale — small motion → noticeable cursor movement
             px_x = self._gyro_px_x_acc if self._mode == "accessible" else self._gyro_px_x
             px_y = self._gyro_px_y_acc if self._mode == "accessible" else self._gyro_px_y
-            self._blade_x += gz  * px_x * dt
-            self._blade_y += -gy * px_y * dt   # invert: gyro up → screen up
+
+            # Test mode: ML model predicts direction; normal: raw gyro integration
+            if self._game_submode == "test" and self._learner is not None:
+                tdx, tdy = self._learner.get_cursor_delta(gs, px_x, px_y, dt)
+                self._blade_x += tdx
+                self._blade_y += tdy
+            else:
+                self._blade_x += -gz * px_x * dt   # invert: yaw left → cursor left
+                self._blade_y += gy  * px_y * dt   # invert: raise hand → cursor up
 
             gyro_mag       = math.hypot(gz, gy)
             visible_thresh = GYRO_VISIBLE_ACC if self._mode == "accessible" else GYRO_VISIBLE
@@ -970,6 +1036,44 @@ class FruitNinjaGame:
                 pygame.draw.circle(self._screen, (255, 150, 100),
                                    (x - r // 3, y - r // 3), max(1, r // 3))
 
+        # Learn / test submode indicators
+        if self._game_submode == "learn" and self._learner is not None:
+            n    = self._learner.total_recordings
+            lbl  = self._font_sm.render(f"LEARN  {n} rec  [R=regular T=test]", True, (255, 130, 60))
+            self._screen.blit(lbl, lbl.get_rect(
+                right=self._W - max(4, int(10 * sc)),
+                bottom=self._H - max(4, int(8 * sc))))
+            if self._learner.rec_flash_active:
+                rec_s = self._font_md.render("● REC", True, (255, 60, 60))
+                self._screen.blit(rec_s, rec_s.get_rect(
+                    center=(self._W // 2, max(24, int(40 * sc)))))
+
+        elif self._game_submode == "test" and self._learner is not None:
+            if self._learner.model_ready:
+                lbl = self._font_sm.render("TEST  MODEL READY  [R=regular L=learn]", True, (100, 220, 255))
+            else:
+                lbl = self._font_sm.render("TEST  NO MODEL  [R=regular L=learn]", True, (255, 140, 100))
+            self._screen.blit(lbl, lbl.get_rect(
+                right=self._W - max(4, int(10 * sc)),
+                bottom=self._H - max(4, int(8 * sc))))
+
+        elif self._game_submode == "play":
+            hint = self._font_sm.render("L=learn  T=test", True, (100, 100, 130))
+            self._screen.blit(hint, hint.get_rect(
+                right=self._W - max(4, int(10 * sc)),
+                bottom=self._H - max(4, int(8 * sc))))
+
+        # Submode switch toast
+        if self._submode_toast > 0:
+            labels = {"play": "REGULAR MODE", "learn": "LEARN MODE", "test": "TEST MODE"}
+            colors = {"play": (180, 180, 255), "learn": (255, 130, 60), "test": (100, 220, 255)}
+            toast_lbl = labels.get(self._game_submode, self._game_submode.upper())
+            toast_clr = colors.get(self._game_submode, TEXT_CLR)
+            alpha = min(255, int(self._submode_toast / 2.5 * 255))
+            ts = self._font_md.render(toast_lbl, True, toast_clr)
+            ts.set_alpha(alpha)
+            self._screen.blit(ts, ts.get_rect(center=(self._W // 2, max(60, int(90 * sc)))))
+
     def _draw_miss_flash(self) -> None:
         a    = int(self._miss_flash / 0.45 * 90)
         surf = pygame.Surface((self._W, self._H), pygame.SRCALPHA)
@@ -1017,7 +1121,13 @@ class FruitNinjaGame:
         dim.fill((0, 0, 0, 180))
         self._screen.blit(dim, (0, 0))
 
-        if self._mode == "accessible":
+        if self._game_submode == "learn" and self._learner is not None:
+            title = "Session Done!"
+            sub   = f"Captured {self._learner.total_recordings} gestures — saving model…"
+        elif self._game_submode == "test":
+            title = "Test Done!"
+            sub   = "Model drove the blade — how did it feel?"
+        elif self._mode == "accessible":
             title = "Great Practice!"
             sub   = "You kept moving — awesome!"
         else:

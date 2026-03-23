@@ -90,12 +90,16 @@ class SnakeGame:
         debug: bool = False,
         mode: str = "standard",
         audio=None,
+        username: str = "",
     ):
-        self._clock  = clock
-        self._debug  = debug
-        self._mode   = mode
-        self._audio  = audio
+        self._clock    = clock
+        self._debug    = debug
+        self._mode     = mode
+        self._audio    = audio
+        self._username = username
         self._gesture_src = None
+        self._mode_toast: float = 0.0
+        self._mode_toast_msg: str = ""
         self._init_layout(screen)
         self._reset()
 
@@ -322,11 +326,19 @@ class SnakeGame:
             return "home"
         elif key == pygame.K_f:
             self._toggle_fullscreen()
+        elif key in (pygame.K_l, pygame.K_t):
+            self._mode_toast_msg = "Learn / Test mode: open Fruit Slice"
+            self._mode_toast = 2.5
+        elif key == pygame.K_r and not self._game_over:
+            self._mode_toast_msg = "Already in Regular mode"
+            self._mode_toast = 1.5
         return None
 
     # ── Update ────────────────────────────────────────────────────────────────
 
     def _update(self, dt: float) -> None:
+        if self._mode_toast > 0:
+            self._mode_toast = max(0.0, self._mode_toast - dt)
         self._read_gesture()
 
         self._move_timer += dt
@@ -386,6 +398,16 @@ class SnakeGame:
                 "GAME OVER",
                 f"Score: {self._score}   R=restart   ESC/H=menu"
             )
+        if self._mode_toast > 0:
+            self._draw_mode_toast()
+
+    def _draw_mode_toast(self) -> None:
+        sc    = self._fsc
+        alpha = min(255, int(self._mode_toast / 2.5 * 255))
+        ts    = self._font_sm.render(self._mode_toast_msg, True, (200, 200, 255))
+        ts.set_alpha(alpha)
+        self._screen.blit(ts, ts.get_rect(
+            center=(self._W // 2, self._H - max(20, int(30 * sc)))))
 
     def _draw_grid(self) -> None:
         c = self._cell

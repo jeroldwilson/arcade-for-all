@@ -169,12 +169,16 @@ class BricksGame:
         debug: bool = False,
         mode: str = "standard",
         audio=None,
+        username: str = "",
     ):
-        self._clock         = clock
-        self._mode          = mode
-        self._audio         = audio
+        self._clock          = clock
+        self._mode           = mode
+        self._audio          = audio
         self._gesture_source = None
-        self._debug_hud     = debug
+        self._debug_hud      = debug
+        self._username       = username
+        self._mode_toast: float = 0.0
+        self._mode_toast_msg: str = ""
         self._init_layout(screen)
         self._reset()
 
@@ -347,6 +351,12 @@ class BricksGame:
             self._launch_all_inactive()
         elif key == pygame.K_f:
             self._toggle_fullscreen()
+        elif key in (pygame.K_l, pygame.K_t):
+            self._mode_toast_msg = "Learn / Test mode: open Fruit Slice"
+            self._mode_toast = 2.5
+        elif key == pygame.K_r and not (self._game_over or self._you_win):
+            self._mode_toast_msg = "Already in Regular mode"
+            self._mode_toast = 1.5
         # Keyboard fallback: SPACE is also wired through trigger_launch
         src = self._gesture_source
         if key == pygame.K_SPACE and hasattr(src, "trigger_launch"):
@@ -356,6 +366,8 @@ class BricksGame:
     # ── Update ────────────────────────────────────────────────────────────────
 
     def _update(self, dt: float) -> None:
+        if self._mode_toast > 0:
+            self._mode_toast = max(0.0, self._mode_toast - dt)
         gs = self._gesture_source.get_state() if self._gesture_source else None
 
         self._update_paddle(dt, gs)
@@ -622,6 +634,8 @@ class BricksGame:
             self._draw_overlay("GAME OVER", f"Score: {self._score}   R=restart   ESC=menu")
         if self._you_win:
             self._draw_overlay("YOU WIN!", f"Final score: {self._score}   R=restart   ESC=menu")
+        if self._mode_toast > 0:
+            self._draw_mode_toast()
 
     def _draw_bricks(self) -> None:
         for brick in self._bricks:
@@ -707,6 +721,14 @@ class BricksGame:
             right=self._W - max(4, int(10 * sc)),
             bottom=self._H - max(4, int(8 * sc)),
         ))
+
+    def _draw_mode_toast(self) -> None:
+        sc    = self._scale
+        alpha = min(255, int(self._mode_toast / 2.5 * 255))
+        ts    = self._font_sm.render(self._mode_toast_msg, True, (200, 200, 255))
+        ts.set_alpha(alpha)
+        self._screen.blit(ts, ts.get_rect(
+            center=(self._W // 2, self._H - max(20, int(30 * sc)))))
 
     def _draw_overlay(self, title: str, subtitle: str = "") -> None:
         sc = self._scale
