@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from shared.sensor import IMUSample
+from shared.fusion_processor import FusionProcessor
+from shared.gesture_detector import SliceDetector
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -110,6 +112,18 @@ class GestureState:
     abs_gx : float  — raw gyro gx (°/s)
     abs_gy : float  — raw gyro gy (°/s)
     abs_gz : float  — raw gyro gz (°/s)
+
+    Sensor Fusion (Madgwick AHRS):
+    qw, qx, qy, qz : float  — quaternion representing orientation
+    euler_roll : float  — degrees, rotation around x-axis (stable via gravity)
+    euler_pitch : float  — degrees, rotation around y-axis (stable via gravity)
+    euler_yaw : float  — degrees, rotation around z-axis (drifts without magnetometer)
+    av_magnitude : float  — total angular velocity magnitude (°/s)
+
+    Slice Gesture Detection:
+    slice_active : bool  — True if a slice gesture was detected this frame
+    slice_direction : str  — direction of slice ("left"/"right"/"up"/"down"/"diagonal_*")
+    combo_count : int  — number of slices detected within the last 1.5 seconds
     """
     paddle_velocity: float = 0.0
     launch: bool = False
@@ -125,6 +139,19 @@ class GestureState:
     abs_gx: float = 0.0
     abs_gy: float = 0.0
     abs_gz: float = 0.0
+    # Sensor fusion (Madgwick filter)
+    qw: float = 1.0
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+    euler_roll: float = 0.0
+    euler_pitch: float = 0.0
+    euler_yaw: float = 0.0
+    av_magnitude: float = 0.0
+    # Slice detection
+    slice_active: bool = False
+    slice_direction: str = ""
+    combo_count: int = 0
 
 
 # ── Main interpreter ──────────────────────────────────────────────────────────
@@ -170,6 +197,11 @@ class GestureInterpreter:
         self._thread: Optional[threading.Thread] = None
         self._sample_count: int = 0
 
+        # Sensor fusion and slice detection
+        self._fusion: FusionProcessor = FusionProcessor()
+        self._slice: SliceDetector = SliceDetector()
+        self._last_ts: float = 0.0
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -209,6 +241,19 @@ class GestureInterpreter:
                 abs_gx=self.state.abs_gx,
                 abs_gy=self.state.abs_gy,
                 abs_gz=self.state.abs_gz,
+                # Sensor fusion
+                qw=self.state.qw,
+                qx=self.state.qx,
+                qy=self.state.qy,
+                qz=self.state.qz,
+                euler_roll=self.state.euler_roll,
+                euler_pitch=self.state.euler_pitch,
+                euler_yaw=self.state.euler_yaw,
+                av_magnitude=self.state.av_magnitude,
+                # Slice detection
+                slice_active=self.state.slice_active,
+                slice_direction=self.state.slice_direction,
+                combo_count=self.state.combo_count,
             )
 
     # ── Processing loop ────────────────────────────────────────────────────────
@@ -308,6 +353,14 @@ class GestureInterpreter:
             spin = (gz - dead) / 200.0 if gz > 0 else (gz + dead) / 200.0
             spin = max(-1.0, min(1.0, spin))
 
+        # ── Sensor fusion & slice detection ──────────────────────────────
+        now_ts = s.timestamp
+        dt_fusion = (now_ts - self._last_ts) if self._last_ts > 0 else 0.01
+        self._last_ts = now_ts
+
+        fusion_state = self._fusion.process(s, dt_fusion)
+        slice_event  = self._slice.update(s.gx, s.gy, s.gz, t=now_ts)
+
         # ── Publish ────────────────────────────────────────────────────────
         with self._lock:
             self.state.paddle_velocity = velocity
@@ -324,6 +377,19 @@ class GestureInterpreter:
             self.state.abs_gx          = s.gx
             self.state.abs_gy          = s.gy
             self.state.abs_gz          = s.gz
+            # Sensor fusion outputs
+            self.state.qw              = fusion_state.qw
+            self.state.qx              = fusion_state.qx
+            self.state.qy              = fusion_state.qy
+            self.state.qz              = fusion_state.qz
+            self.state.euler_roll      = fusion_state.euler_roll_deg
+            self.state.euler_pitch     = fusion_state.euler_pitch_deg
+            self.state.euler_yaw       = fusion_state.euler_yaw_deg
+            self.state.av_magnitude    = fusion_state.av_magnitude
+            # Slice detection outputs
+            self.state.slice_active    = slice_event is not None
+            self.state.slice_direction = slice_event.direction if slice_event else ""
+            self.state.combo_count     = self._slice.combo_count
 
         # Log every 10th sample (~10 Hz at 100 Hz sensor rate)
         self._sample_count += 1

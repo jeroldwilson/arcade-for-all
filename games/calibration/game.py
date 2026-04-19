@@ -64,6 +64,11 @@ class CalibrationGame:
         self._mode_toast: float = 0.0
         self._mode_toast_msg: str = ""
 
+        # Sensor fusion warmup state (only in sensor mode, not keyboard)
+        self._fusion_warmup: float = 0.0    # countdown seconds remaining
+        self._fusion_ready: bool = False
+        self._fig8_t: float = 0.0    # animation phase for figure-8 guide
+
         self._init_layout()
 
     # ── Layout ────────────────────────────────────────────────────────────────
@@ -134,6 +139,18 @@ class CalibrationGame:
             gy = gs.abs_gy
             gz = gs.abs_gz
 
+            # Trigger fusion warmup once calibration completes (sensor mode only)
+            if (gs.calibrated and not self._fusion_ready and self._fusion_warmup <= 0.0
+                    and self._mode != "keyboard"):
+                self._fusion_warmup = 8.0
+
+            # Countdown fusion warmup
+            if self._fusion_warmup > 0.0:
+                self._fusion_warmup = max(0.0, self._fusion_warmup - dt)
+                self._fig8_t += dt
+                if self._fusion_warmup <= 0.0:
+                    self._fusion_ready = True
+
             # Integrate yaw from gz (yaw-rate °/s × dt s)
             self._yaw_deg = (self._yaw_deg + gz * dt) % 360.0
             if self._mode_toast > 0:
@@ -145,8 +162,12 @@ class CalibrationGame:
             pitch_deg = math.degrees(math.atan2(-ax, math.sqrt(ay ** 2 + az ** 2)))
             roll_deg  = math.degrees(math.atan2(ay, az))
 
+            # Use fusion euler angles if available (stable), else trig fallback
+            pitch_display = gs.euler_pitch if gs.euler_pitch != 0.0 else pitch_deg
+            roll_display = gs.euler_roll if gs.euler_roll != 0.0 else roll_deg
+
             self._draw(ax, ay, az, gx, gy, gz,
-                       pitch_deg, roll_deg, self._yaw_deg, gs.calibrated)
+                       pitch_display, roll_display, self._yaw_deg, gs.calibrated, gs)
             if self._mode_toast > 0:
                 sc    = self._sc
                 alpha = min(255, int(self._mode_toast / 2.5 * 255))
@@ -161,7 +182,7 @@ class CalibrationGame:
     # ── Top-level draw ────────────────────────────────────────────────────────
 
     def _draw(self, ax, ay, az, gx, gy, gz,
-              pitch, roll, yaw, calibrated) -> None:
+              pitch, roll, yaw, calibrated, gs=None) -> None:
         self._screen.fill(BG)
         self._draw_dividers()
 
@@ -180,10 +201,13 @@ class CalibrationGame:
         self._draw_front_view(inners[0], roll)
         self._draw_side_view(inners[1], pitch)
         self._draw_top_view(inners[2], yaw)
-        self._draw_data_panel(inners[3], ax, ay, az, gx, gy, gz, pitch, roll, yaw)
+        self._draw_data_panel(inners[3], ax, ay, az, gx, gy, gz, pitch, roll, yaw, gs)
 
         if not calibrated:
             self._draw_calibrating_overlay()
+
+        if self._fusion_warmup > 0.0:
+            self._draw_fusion_warmup_overlay(self._fusion_warmup)
 
     def _draw_dividers(self) -> None:
         sw, sh = self._W, self._H
@@ -472,10 +496,20 @@ class CalibrationGame:
 
     def _draw_data_panel(self, area: pygame.Rect,
                          ax, ay, az, gx, gy, gz,
-                         pitch, roll, yaw) -> None:
+                         pitch, roll, yaw, gs=None) -> None:
         lh = max(14, int(16 * self._sc))
         y = area.top + 4
         x = area.left + 8
+
+        # Prepare fusion data (with defaults for keyboard mode)
+        euler_roll = gs.euler_roll if gs and gs.euler_roll != 0.0 else 0.0
+        euler_pitch = gs.euler_pitch if gs and gs.euler_pitch != 0.0 else 0.0
+        euler_yaw = gs.euler_yaw if gs and gs.euler_yaw != 0.0 else 0.0
+        av_mag = gs.av_magnitude if gs else 0.0
+        qw = gs.qw if gs else 1.0
+        qx = gs.qx if gs else 0.0
+        qy = gs.qy if gs else 0.0
+        qz = gs.qz if gs else 0.0
 
         rows = [
             ("ATTITUDE",              None,       None),
@@ -493,6 +527,13 @@ class CalibrationGame:
             ("  gy",      f"{gy:+7.1f} °/s",     TEXT_CLR),
             ("  gz",      f"{gz:+7.1f} °/s",     TEXT_CLR),
             ("",                      None,       None),
+            ("SENSOR FUSION",         None,       None),
+            ("  Roll ",   f"{euler_roll:+7.1f} °",   (100, 220, 255)),
+            ("  Pitch",   f"{euler_pitch:+7.1f} °",  (100, 220, 255)),
+            ("  Yaw  ",   f"{euler_yaw:+7.1f} °",    (80, 170, 200)),
+            ("  AV mag",  f"{av_mag:+7.1f} °/s",     TEXT_CLR),
+            (f"  q={qw:+.2f},{qx:+.2f},{qy:+.2f},{qz:+.2f}", None, DIM_CLR),
+            ("",                      None,       None),
             ("CONTROLS",              None,       None),
             ("  ESC",     "home",                DIM_CLR),
             ("  SPACE",   "reset yaw",           DIM_CLR),
@@ -503,10 +544,12 @@ class CalibrationGame:
             if not label:
                 y += lh // 2
                 continue
-            if color is None:
-                surf = self._font_data.render(label, True, ACCENT_CLR)
+            if value is None:
+                # Section header or info-only label
+                surf = self._font_data.render(label, True, color if color else ACCENT_CLR)
                 self._screen.blit(surf, (x, y))
             else:
+                # Label + value pair
                 lsurf = self._font_data.render(label, True, DIM_CLR)
                 vsurf = self._font_data.render(value, True, color)
                 self._screen.blit(lsurf, (x, y))
@@ -528,3 +571,54 @@ class CalibrationGame:
             "Hold the sensor still to establish neutral orientation.", True, TEXT_CLR)
         self._screen.blit(t, t.get_rect(center=(cx, cy - 18)))
         self._screen.blit(s, s.get_rect(center=(cx, cy + 16)))
+
+    # ── Sensor Fusion Warmup Overlay ───────────────────────────────────────────
+
+    def _draw_fusion_warmup_overlay(self, warmup_remaining: float) -> None:
+        """
+        Semi-transparent overlay with animated figure-8 guidance and countdown.
+        Shows during the 8-second fusion sensor convergence phase.
+        """
+        overlay = pygame.Surface((self._W, self._H), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 140))
+        self._screen.blit(overlay, (0, 0))
+
+        cx, cy = self._W // 2, self._H // 2
+        sc = self._sc
+
+        # Title
+        title = self._font_big.render("SENSOR FUSION WARMING UP", True, ACCENT_CLR)
+        self._screen.blit(title, title.get_rect(center=(cx, int(cy - 90 * sc))))
+
+        # Instructions
+        sub = self._font_data.render(
+            "Move sensor in a figure-8 pattern to initialize orientation",
+            True, TEXT_CLR)
+        self._screen.blit(sub, sub.get_rect(center=(cx, int(cy - 60 * sc))))
+
+        # Animated Lissajous figure-8 guide
+        # x = A * sin(t + π/2), y = B * sin(2t)
+        A = int(120 * sc)
+        B = int(60 * sc)
+        N = 120  # path sample points
+        pts = []
+        for i in range(N + 1):
+            phase = 2 * math.pi * i / N
+            px = cx + int(A * math.sin(phase + math.pi / 2))
+            py = int(cy + 20 * sc) + int(B * math.sin(2 * phase))
+            pts.append((px, py))
+
+        # Draw dim guide path
+        for i in range(1, len(pts)):
+            pygame.draw.line(self._screen, (60, 120, 180), pts[i-1], pts[i], 2)
+
+        # Animated dot following the figure-8
+        dot_phase = (self._fig8_t * 0.9) % (2 * math.pi)  # ~7.2 seconds per loop
+        dot_x = cx + int(A * math.sin(dot_phase + math.pi / 2))
+        dot_y = int(cy + 20 * sc) + int(B * math.sin(2 * dot_phase))
+        pygame.draw.circle(self._screen, ACCENT_CLR, (dot_x, dot_y), max(5, int(8 * sc)))
+
+        # Countdown timer
+        countdown = self._font_big.render(f"{warmup_remaining:.0f}s", True, WARN_CLR)
+        self._screen.blit(countdown, countdown.get_rect(
+            center=(cx, int(cy + 100 * sc))))

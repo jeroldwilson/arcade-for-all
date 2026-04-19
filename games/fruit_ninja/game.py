@@ -458,6 +458,7 @@ class FruitNinjaGame:
         self._gesture_src  = None
         self._submode_toast: float = 0.0   # seconds remaining for toast message
         self._show_validation: bool = False
+        self._sklearn_missing: bool = False  # set True when sklearn is not installed
 
         # Gesture learning system — created lazily when learn/test mode is active
         self._learner = None
@@ -476,10 +477,16 @@ class FruitNinjaGame:
         if self._learner is not None:
             return
         try:
-            from shared.gesture_learner import GestureLearningSystem
+            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            if not SKLEARN_AVAILABLE:
+                self._sklearn_missing = True
+                print("[fruit_ninja] scikit-learn not installed — learn/test mode unavailable.")
+                return
             self._learner = GestureLearningSystem(username=self._username)
-        except ImportError:
-            print("[fruit_ninja] scikit-learn not installed — learn/test mode disabled.")
+            self._sklearn_missing = False
+        except ImportError as exc:
+            self._sklearn_missing = True
+            print(f"[fruit_ninja] Import error: {exc}")
 
     def _switch_submode(self, new_mode: str) -> None:
         """Switch between play/learn/test submodes at runtime."""
@@ -565,6 +572,8 @@ class FruitNinjaGame:
         self._blade_y  = float(self._H // 2)
         self._moving   = False
         self._last_move_ms = 0   # ticks of last meaningful movement
+        self._blade_av = 0.0     # angular velocity magnitude (for trail effects)
+        self._last_combo = 0     # combo count (cached for HUD)
 
         # Trail: list of (x, y, ticks_ms)
         self._trail: List[Tuple[float, float, int]] = []
@@ -653,6 +662,7 @@ class FruitNinjaGame:
                 gs,
                 (self._blade_x, self._blade_y),
                 fruits_xy,
+                mode=self._mode,
             )
 
         self._detect_slices()
@@ -676,6 +686,11 @@ class FruitNinjaGame:
             self._moving  = True
             self._last_move_ms = now_ms
         elif gs is not None:
+            # Store AV magnitude for trail rendering effects
+            self._blade_av = getattr(gs, 'av_magnitude', 0.0)
+            # Store combo count for HUD display
+            self._last_combo = getattr(gs, 'combo_count', 0)
+
             # Sensor mode: integrate raw gyro values
             # abs_gz (yaw)   → horizontal
             # abs_gy (pitch) → vertical (positive gy = wrist pitches up = cursor up)
@@ -855,14 +870,28 @@ class FruitNinjaGame:
                     self._game_over = True
                     self._stars = 0
         else:
-            self._score += 1
+            # Combo multiplier: 1x (no combo), 2x (1-2 combo), 3x (3+)
+            combo = self._last_combo
+            multiplier = min(3, 1 + combo // 2)
+            points = multiplier
+            self._score += points
+
             if self._audio:
                 self._audio.play_collect()
             self._spawn_halves(fruit)
             clr = JUICE_COLORS.get(fruit.kind, (200, 200, 200))
             self._spawn_juice(fruit.x, fruit.y, clr, fruit.r)
+
+            # Score float with combo indicator
+            if combo > 1:
+                score_text = f"+{points} x{multiplier}!"
+                float_color = (255, 220, 60)  # golden for combo
+            else:
+                score_text = f"+{points}"
+                float_color = (255, 255, 255)
+
             self._score_floats.append(ScoreFloat(
-                x=fruit.x, y=fruit.y, text="+1", color=(255, 255, 255)))
+                x=fruit.x, y=fruit.y, text=score_text, color=float_color))
 
     # ── Halves & particles ────────────────────────────────────────────────────
 
@@ -996,6 +1025,13 @@ class FruitNinjaGame:
         pts    = self._trail[-24:]
         if len(pts) < 2:
             return
+
+        # Compute AV boost for enhanced visual effects when swinging fast
+        av = self._blade_av
+        dead = GYRO_DEAD_ACC if self._mode == "accessible" else GYRO_DEAD
+        slice_thresh = GYRO_SLICE_ACC if self._mode == "accessible" else GYRO_SLICE
+        av_boost = min(1.0, max(0.0, (av - slice_thresh) / (300.0 - slice_thresh)))
+
         for i in range(1, len(pts)):
             x0, y0, t0 = pts[i - 1]
             x1, y1, t1 = pts[i]
@@ -1003,10 +1039,15 @@ class FruitNinjaGame:
             fade = max(0.0, 1.0 - age)
             if fade <= 0:
                 continue
-            w = max(1, int((4.0 - age * 3.5) * self._sc))
+            # Width scales with AV: base 4px + up to 2px when swinging hard
+            w = max(1, int((4.0 - age * 3.5 + av_boost * 2.0) * self._sc))
             c = int(230 * fade)
+            # Color lerps toward bright white when swinging fast
+            r_ch = int(c + (255 - c) * av_boost * 0.7)
+            g_ch = int(int(c * 0.82) + 20 + (255 - (int(c * 0.82) + 20)) * av_boost * 0.7)
+            b_ch = 255
             pygame.draw.line(self._screen,
-                             (c, int(c * 0.82) + 20, 255),
+                             (r_ch, g_ch, b_ch),
                              (int(x0), int(y0)), (int(x1), int(y1)), w)
         # Tip glow
         x, y, _ = pts[-1]
@@ -1051,10 +1092,28 @@ class FruitNinjaGame:
                 pygame.draw.circle(self._screen, (255, 150, 100),
                                    (x - r // 3, y - r // 3), max(1, r // 3))
 
+        # Combo indicator (when combo > 1)
+        if self._last_combo > 1:
+            combo_mult = min(3, 1 + self._last_combo // 2)
+            combo_text = self._font_sm.render(f"COMBO x{combo_mult}", True, (255, 220, 60))
+            combo_y = max(4, int(8 * sc)) + max(14, int(20 * sc))
+            self._screen.blit(combo_text, combo_text.get_rect(
+                right=self._W - max(4, int(10 * sc)),
+                top=combo_y))
+
         # Learn / test submode indicators
-        if self._game_submode == "learn" and self._learner is not None:
+        if self._game_submode == "learn" and self._sklearn_missing:
+            lbl = self._font_sm.render(
+                "LEARN UNAVAILABLE — pip install scikit-learn", True, (255, 80, 60))
+            self._screen.blit(lbl, lbl.get_rect(
+                right=self._W - max(4, int(10 * sc)),
+                bottom=self._H - max(4, int(8 * sc))))
+
+        elif self._game_submode == "learn" and self._learner is not None:
             n    = self._learner.total_recordings
-            lbl  = self._font_sm.render(f"LEARN  {n} rec  [R=regular T=test]", True, (255, 130, 60))
+            bal  = "" if self._learner.class_balance_ok else "  ⚠ imbalanced"
+            lbl  = self._font_sm.render(
+                f"LEARN  {n} rec{bal}  [R=regular T=test]", True, (255, 130, 60))
             self._screen.blit(lbl, lbl.get_rect(
                 right=self._W - max(4, int(10 * sc)),
                 bottom=self._H - max(4, int(8 * sc))))
@@ -1062,6 +1121,13 @@ class FruitNinjaGame:
                 rec_s = self._font_md.render("● REC", True, (255, 60, 60))
                 self._screen.blit(rec_s, rec_s.get_rect(
                     center=(self._W // 2, max(24, int(40 * sc)))))
+
+        elif self._game_submode == "test" and self._sklearn_missing:
+            lbl = self._font_sm.render(
+                "TEST UNAVAILABLE — pip install scikit-learn", True, (255, 80, 60))
+            self._screen.blit(lbl, lbl.get_rect(
+                right=self._W - max(4, int(10 * sc)),
+                bottom=self._H - max(4, int(8 * sc))))
 
         elif self._game_submode == "test" and self._learner is not None:
             if self._learner.model_ready:
@@ -1210,12 +1276,15 @@ class FruitNinjaGame:
         add("MODEL VALIDATION  [V close]", (100, 180, 255))
         add("")
 
-        if self._learner is None:
+        if self._sklearn_missing:
+            add("sklearn not installed", (220, 90, 70))
+            add("pip install scikit-learn", (180, 100, 80))
+        elif self._learner is None:
             add("No learner.", (200, 100, 100))
         elif self._learner.validation_running:
             dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
             add(f"Validating{dots}", (220, 210, 80))
-            add("5-fold CV running…", (110, 110, 140))
+            add("session-aware CV running…", (110, 110, 140))
         else:
             res = self._learner.validation_result
             if res is None:
@@ -1227,48 +1296,55 @@ class FruitNinjaGame:
                 acc_clr = (80, 215, 100) if acc_pct >= 75 else \
                           (230, 195, 55) if acc_pct >= 55 else (215, 75, 75)
                 add(f"Accuracy: {acc_pct}%", acc_clr)
-                add(f"{res.n_samples} samples  {res.n_sessions} sessions", (110, 110, 140))
+                add(f"{res.n_samples} samples  {res.n_sessions} sessions  "
+                    f"{res.cv_folds_used} folds", (110, 110, 140))
                 add("")
 
                 dir_labels = {"right": "→R", "left": "←L", "up": "↑U", "down": "↓D"}
                 dirs_in_data = [d for d in DIRECTIONS if d in res.per_class]
 
-                add("Dir   Acc   n    bar", (110, 110, 150))
+                add("Dir  F1   P   R    n", (110, 110, 150))
                 add("─" * 28, (50, 50, 75))
                 for d in dirs_in_data:
                     info    = res.per_class[d]
-                    pct     = int(info["accuracy"] * 100)
+                    f1_pct  = int(info.get("f1", 0) * 100)
+                    p_pct   = int(info.get("precision", 0) * 100)
+                    r_pct   = int(info.get("recall", 0) * 100)
                     support = info["support"]
                     is_weak = (d == res.weakest_class)
                     clr     = (255, 215, 70) if is_weak else (185, 185, 210)
-                    bar_filled = int(info["accuracy"] * 8)
-                    bar_str    = "█" * bar_filled + "░" * (8 - bar_filled)
-                    add(f"{dir_labels[d]:<5} {pct:>3}%  {support:>3}  {bar_str}", clr)
+                    add(f"{dir_labels[d]:<4} {f1_pct:>3}% {p_pct:>3}% {r_pct:>3}%  {support:>3}", clr)
 
                 add("")
-                short = {"right": "R", "left": "L", "up": "U", "down": "D"}
+                short  = {"right": "R", "left": "L", "up": "U", "down": "D"}
                 dirs_m = [d for d in DIRECTIONS if d in res.confusion]
                 if dirs_m:
                     add("Confusion (true→pred):", (110, 110, 150))
                     hdr = "     " + "  ".join(f"{short[d]:<2}" for d in dirs_m)
                     add(hdr, (100, 130, 170))
-                    max_off = max(
-                        (res.confusion[t][p] for t in dirs_m for p in dirs_m if t != p),
-                        default=1) or 1
                     for true_d in dirs_m:
                         row = f"{short[true_d]:<3}  "
                         row += "  ".join(f"{res.confusion[true_d].get(p,0):<2}" for p in dirs_m)
                         diag_ok = res.confusion[true_d].get(true_d, 0)
-                        row_clr = (80, 200, 100) if diag_ok >= res.per_class[true_d]["support"] * 0.7 \
-                                  else (185, 185, 210)
+                        row_clr = (80, 200, 100) \
+                            if diag_ok >= res.per_class[true_d]["support"] * 0.7 \
+                            else (185, 185, 210)
                         add(row, row_clr)
 
+                add("")
+                fp_pct  = int(res.fp_rate * 100)
+                ab_pct  = int(res.abstain_rate * 100)
+                lat_str = f"{res.latency_ms:.2f}ms" if res.latency_ms > 0 else "n/a"
+                add(f"FP rate: {fp_pct}%   Abstain: {ab_pct}%", (140, 140, 170))
+                add(f"Latency: ~{lat_str}", (140, 140, 170))
+
                 if res.weakest_class and not res.error:
-                    weak_acc = int(res.per_class[res.weakest_class]["accuracy"] * 100)
-                    if weak_acc < 80:
+                    weak_f1 = int(res.per_class[res.weakest_class].get("f1", 0) * 100)
+                    if weak_f1 < 80:
                         arrow = {"right": "→", "left": "←", "up": "↑", "down": "↓"}
                         add("")
-                        add(f"Tip: more {arrow.get(res.weakest_class,'')} {res.weakest_class} ({weak_acc}%)",
+                        add(f"Tip: more {arrow.get(res.weakest_class,'')} "
+                            f"{res.weakest_class} (F1={weak_f1}%)",
                             (255, 210, 70))
 
         # ── Measure height ────────────────────────────────────────────────────
