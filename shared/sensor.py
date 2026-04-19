@@ -121,6 +121,47 @@ _CMD_LED_STOP       = bytes([_MODULE_LED, 0x02, 0x01])    # STOP=0x02, clear=1
 _MODULE_HAPTIC      = 0x08
 _CMD_HAPTIC_BUZZ    = bytes([_MODULE_HAPTIC, 0x01, 0xF8, 0xF4, 0x01])
 
+# Sensor Fusion module (0x19) — Bosch Kalman Filter NDOF mode (acc+gyro+BMM150 mag)
+#
+# Confirmed register map (from MetaWear-CppAPI sensor_fusion_register.h):
+#   0x01 ENABLE            0x02 MODE              0x03 OUTPUT_ENABLE
+#   0x04 CORRECTED_ACC     0x05 CORRECTED_GYRO    0x06 CORRECTED_MAG
+#   0x07 QUATERNION        0x08 EULER_ANGLES       0x09 GRAVITY_VECTOR
+#   0x0A LINEAR_ACC        0x0B CALIBRATION_STATE  0x0C ACC_CAL_DATA
+#   0x0D GYRO_CAL_DATA     0x0E MAG_CAL_DATA
+#
+# Streaming start sequence:
+#   0. Pre-config acc+gyro:  [0x03, 0x03, odr, range]  [0x13, 0x03, odr, range]  (config only — no start)
+#   1. Probe module:         [0x19, 0x80] → [0x19, 0x80, impl, rev, ...]  confirms SF present
+#   2. Write config (NDOF):  [0x19, 0x02, 0x01, 0x31]  nibble-packed: low=acc_range, high=gyro_range+1
+#   3. Subscribe Euler:      [0x19, 0x08, 0x01] → periodic [0x19, 0x08, <4×float32>]
+#   4. Subscribe cal state:  [0x19, 0x0B, 0x01] → periodic [0x19, 0x0B, <uint8 0-3>]
+#   5. Start fusion:         [0x19, 0x01, 0x01]
+#
+# One-shot reads (response at reg = cmd & 0x7F):
+#   [0x19, 0x8B] → [0x19, 0x0B, cal_state_byte]
+_MODULE_SENSOR_FUSION  = 0x19
+# Write config: [module, MODE_reg=0x02, mode_byte=0x01 (NDOF), config_byte]
+# config_byte nibble format confirmed from MetaWear-SDK-Cpp:
+#   lower nibble = acc_range_enum  (0=±2G, 1=±4G, 2=±8G, 3=±16G)
+#   upper nibble = gyro_range_enum+1  (1=±2000dps, 2=±1000dps, 3=±500dps, 4=±250dps)
+# The original 0x0A used wrong packing (acc|gyro<<2) which is why it disconnected.
+# 0x31 = acc=±4G (lower=1), gyro=±500dps (upper=3, enum=2, written as 3=enum+1)
+_CMD_SF_MODE           = bytes([_MODULE_SENSOR_FUSION, 0x02, 0x01, 0x31])  # NDOF, acc±4G, gyro±500dps
+_CMD_SF_EULER_EN       = bytes([_MODULE_SENSOR_FUSION, 0x08, 0x01])  # subscribe EULER_ANGLES (0x08)
+_CMD_SF_CAL_EN         = bytes([_MODULE_SENSOR_FUSION, 0x0B, 0x01])  # subscribe CALIBRATION_STATE (0x0B)
+_CMD_SF_START          = bytes([_MODULE_SENSOR_FUSION, 0x01, 0x01])  # start fusion
+_CMD_SF_EULER_DIS      = bytes([_MODULE_SENSOR_FUSION, 0x08, 0x00])  # unsubscribe Euler
+_CMD_SF_CAL_DIS        = bytes([_MODULE_SENSOR_FUSION, 0x0B, 0x00])  # unsubscribe cal state
+_CMD_SF_STOP           = bytes([_MODULE_SENSOR_FUSION, 0x01, 0x00])  # stop fusion
+_CMD_SF_CORR_ACC_EN    = bytes([_MODULE_SENSOR_FUSION, 0x04, 0x01])  # subscribe CORRECTED_ACC
+_CMD_SF_CORR_GYRO_EN   = bytes([_MODULE_SENSOR_FUSION, 0x05, 0x01])  # subscribe CORRECTED_GYRO
+_CMD_SF_CORR_ACC_DIS   = bytes([_MODULE_SENSOR_FUSION, 0x04, 0x00])
+_CMD_SF_CORR_GYRO_DIS  = bytes([_MODULE_SENSOR_FUSION, 0x05, 0x00])
+_CMD_SF_PROBE          = bytes([_MODULE_SENSOR_FUSION, 0x80])        # module info probe
+_CMD_SF_READ_CAL_STATE = bytes([_MODULE_SENSOR_FUSION, 0x8B])        # one-shot cal state read (0x80|0x0B)
+_CMD_SF_READ_CAL_DATA  = bytes([_MODULE_SENSOR_FUSION, 0x8C])        # one-shot acc cal data read (0x80|0x0C)
+
 # Scale factors (raw int16 → physical units)
 # BMI160 at ±4 g  → 1 LSB = 4/32768 g ≈ 0.0001221 g
 _ACC_SCALE  = 4.0 / 32768.0
@@ -140,6 +181,11 @@ class IMUSample:
     gx: float = 0.0
     gy: float = 0.0
     gz: float = 0.0
+    # Bosch Kalman Filter hardware fusion outputs (module 0x19, NDOF mode)
+    hw_heading: float = 0.0       # compass heading 0-360° (drift-free yaw)
+    hw_pitch: float = 0.0         # pitch -90 to +90°
+    hw_roll: float = 0.0          # roll -180 to +180°
+    hw_fusion_valid: bool = False  # True once hardware fusion data is arriving
 
 
 class MetaMotionSensor:
@@ -182,6 +228,15 @@ class MetaMotionSensor:
         # Counters for module-specific notifications
         self._acc_notify_count = 0
         self._gyro_notify_count = 0
+        # BMM150 magnetometer calibration state (0 = uncalibrated, 3 = fully calibrated)
+        self._mag_cal_state: int = 0
+        self._pending_cal_data: bytes = b''
+        # Bosch Kalman Filter hardware fusion state
+        self._last_euler: tuple = (0.0, 0.0, 0.0, 0.0)  # (heading, pitch, roll, yaw)
+        self._hw_fusion_valid: bool = False
+        self._sf_notify_count: int = 0
+        self._using_sf: bool = False  # True when streaming via module 0x19 instead of raw 0x03/0x13
+        self._address: Optional[str] = None  # stored in connect() for reconnect-after-SF-disconnect
 
     # ── Public sync API (for use from game / main thread) ─────────────────────
 
@@ -215,6 +270,31 @@ class MetaMotionSensor:
     def set_sample_callback(self, cb: Callable[[IMUSample], None]) -> None:
         """Optional callback invoked on every sample (runs in BLE thread)."""
         self._on_sample_cb = cb
+
+    @property
+    def mag_cal_state(self) -> int:
+        """BMM150 magnetometer calibration state: 0 = offline, 3 = fully calibrated."""
+        return self._mag_cal_state
+
+    def poll_mag_cal_state(self) -> None:
+        """Request current mag calibration state; self.mag_cal_state updates on next notification."""
+        if not self._loop or not self._client or not self._connected:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._async_write(_CMD_SF_READ_CAL_STATE), self._loop
+            )
+        except Exception as e:
+            print(f"[sensor] poll_mag_cal_state failed: {e}")
+
+    def save_calibration_to_nvm(self) -> None:
+        """Read current sensor-fusion calibration offsets and persist them to NVM flash."""
+        if not self._loop or not self._client or not self._connected:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._async_save_calibration(), self._loop)
+        except Exception as e:
+            print(f"[sensor] save_calibration_to_nvm scheduling failed: {e}")
 
     # Convenience sync wrappers that schedule async BLE writes on the BLE loop.
     def set_ambient_light(self, on: bool = True) -> None:
@@ -315,6 +395,7 @@ class MetaMotionSensor:
         """Connect via BLE and enable notifications."""
         logger.info("Connecting to %s…", address)
         print(f"[sensor] Connecting to {address}…")
+        self._address = address
         self._client = BleakClient(address)
         try:
             await self._client.connect()
@@ -423,93 +504,163 @@ class MetaMotionSensor:
             print("[sensor] Disconnected.")
 
     async def start_streaming(self) -> None:
-        """Send firmware commands to begin accelerometer + gyro streaming."""
+        """
+        Start sensor data streaming.
+
+        Preferred path: Bosch Kalman Filter sensor fusion (module 0x19, NDOF mode).
+        The SF module controls acc/gyro/mag internally — raw modules 0x03/0x13 must
+        NOT be started at the same time or the firmware disconnects.
+        Fallback: raw acc/gyro (modules 0x03/0x13) when SF is unavailable.
+        """
         if not self._connected or not self._client:
             return
-        cmd = self._client.write_gatt_char
 
         async def _send(label: str, payload: bytes, with_response: bool = True) -> bool:
+            # Look up self._client at call time so reconnect mid-sequence is handled.
+            if not self._client:
+                print(f"[sensor]   FAILED {label}: no client")
+                return False
             try:
-                await cmd(METAWEAR_COMMAND_CHAR_UUID, payload, response=with_response)
+                await self._client.write_gatt_char(
+                    METAWEAR_COMMAND_CHAR_UUID, payload, response=with_response
+                )
                 print(f"[sensor]   sent {label}  {payload.hex()}  response={with_response}")
                 return True
             except Exception as e:
                 print(f"[sensor]   FAILED {label}: {e}")
                 return False
 
-        print("[sensor] Sending streaming commands (Write-With-Response)…")
-        # Step 1: configure sensors (ODR + range)
-        await _send("ACC_CONFIG",       _CMD_ACC_CONFIG)
-        await asyncio.sleep(0.12)
-        await _send("GYRO_CONFIG",      _CMD_GYRO_CONFIG)
-        await asyncio.sleep(0.12)
-        # Step 2: datasignal_subscribe — routes data to GATT notify char
-        await _send("ACC_DATA_SUB",     _CMD_ACC_DATA_SUB)
-        await asyncio.sleep(0.12)
-        await _send("GYRO_DATA_SUB",    _CMD_GYRO_DATA_SUB)
-        await asyncio.sleep(0.12)
-        # Step 3: enable_sampling — enables hardware interrupt
-        await _send("ACC_SUBSCRIBE",    _CMD_ACC_SUBSCRIBE)
-        await asyncio.sleep(0.12)
-        await _send("GYRO_SUBSCRIBE",   _CMD_GYRO_SUBSCRIBE)
-        await asyncio.sleep(0.12)
-        # Step 4: power on sensors
-        await _send("ACC_START",        _CMD_ACC_START)
-        await asyncio.sleep(0.12)
-        await _send("GYRO_START",       _CMD_GYRO_START)
-        # give firmware time to begin streaming and deliver notifications
-        await asyncio.sleep(0.25)
+        # ── 1. Probe SF module ─────────────────────────────────────────────────
+        print("[sensor] Probing sensor fusion module 0x19…")
+        count_before = self._notify_count
+        probe_ok = await _send("SF_PROBE", _CMD_SF_PROBE)
+        await asyncio.sleep(0.35)
+        sf_available = probe_ok and (self._notify_count > count_before)
+        print(f"[sensor] SF probe: {'available ✓' if sf_available else 'not available — using raw acc/gyro'}")
 
-        # Check whether accelerometer / gyro notifications have started.
-        self._streaming = True
-        logger.info("Streaming started.")
-        print("[sensor] Streaming started — waiting for notifications…")
-
-        # Wait up to 2s for an accel/gyro notification. If none arrive, retry
-        # using Write-Without-Response for the subscribe/start commands as a
-        # fallback (some firmware revisions behave differently).
-        waited = 0.0
-        while waited < 2.0:
-            if self._acc_notify_count > 0 or self._gyro_notify_count > 0:
-                print(f"[sensor] Received IMU notifications — acc={self._acc_notify_count} gyro={self._gyro_notify_count}")
-                return
-            await asyncio.sleep(0.15)
-            waited += 0.15
-
-        print("[sensor] No IMU notifications received within timeout — retrying with no-response writes…")
-        # Retry using response=False (write without response)
-        try:
-            for payload in [
-                _CMD_ACC_CONFIG, _CMD_GYRO_CONFIG,
-                _CMD_ACC_DATA_SUB, _CMD_GYRO_DATA_SUB,
-                _CMD_ACC_SUBSCRIBE, _CMD_GYRO_SUBSCRIBE,
-                _CMD_ACC_START, _CMD_GYRO_START,
+        # ── 2a. Sensor Fusion path ─────────────────────────────────────────────
+        if sf_available:
+            print("[sensor] Starting sensor fusion (NDOF — acc±4G gyro±500dps, config=0x31)…")
+            # Pre-configure acc + gyro hardware modules BEFORE sending SF MODE.
+            # The Bosch SF module picks up these config values when it starts.
+            # We send CONFIG only — no subscribe/start so firmware stays quiescent.
+            for label, payload in [
+                ("ACC_CONFIG",  _CMD_ACC_CONFIG),
+                ("GYRO_CONFIG", _CMD_GYRO_CONFIG),
             ]:
-                await cmd(METAWEAR_COMMAND_CHAR_UUID, payload, response=False)
-                await asyncio.sleep(0.05)
-            print("[sensor] Retry sent (no-response). Waiting 1s for notifications…")
-            await asyncio.sleep(1.0)
+                await _send(label, payload)
+                await asyncio.sleep(0.12)
+
+            for label, payload, delay in [
+                ("SF_MODE",         _CMD_SF_MODE,         0.35),  # 3-byte NDOF mode only
+                ("SF_CORR_ACC_EN",  _CMD_SF_CORR_ACC_EN,  0.15),  # corrected acc  (0x04)
+                ("SF_CORR_GYRO_EN", _CMD_SF_CORR_GYRO_EN, 0.15),  # corrected gyro (0x05)
+                ("SF_EULER_EN",     _CMD_SF_EULER_EN,      0.15),  # euler angles   (0x08)
+                ("SF_CAL_EN",       _CMD_SF_CAL_EN,        0.15),  # cal state      (0x0B)
+                ("SF_START",        _CMD_SF_START,         0.50),  # start fusion
+            ]:
+                ok = await _send(label, payload)
+                await asyncio.sleep(delay)
+                if not ok and label == "SF_MODE":
+                    print("[sensor] SF_MODE failed — aborting SF path, falling back to raw")
+                    sf_available = False
+                    # If firmware disconnected us, reconnect before raw fallback
+                    if not self._connected and self._address:
+                        print("[sensor] Device disconnected — reconnecting for raw fallback…")
+                        await asyncio.sleep(1.5)
+                        try:
+                            self._client = BleakClient(self._address)
+                            await self._client.connect()
+                            await asyncio.sleep(0.5)
+                            self._connected = True
+                            await self._client.start_notify(
+                                METAWEAR_NOTIFY_CHAR_UUID, self._notification_handler
+                            )
+                            print("[sensor] ✓ Reconnected — proceeding with raw acc/gyro")
+                        except Exception as re_exc:
+                            print(f"[sensor] Reconnect failed: {re_exc}")
+                            return
+                    break
+
+        if sf_available:
+            self._streaming = True
+            self._using_sf  = True
+            logger.info("Streaming started (sensor fusion).")
+            print(f"[sensor] SF streaming started — waiting for corrected acc data…")
+            for _ in range(20):        # up to 4 s
+                await asyncio.sleep(0.2)
+                if self._acc_notify_count > 0:
+                    print(f"[sensor] ✓ SF data flowing — acc={self._acc_notify_count} "
+                          f"euler={self._sf_notify_count} cal={self._mag_cal_state}")
+                    return
+            print(f"[sensor] No SF data after 4s (acc={self._acc_notify_count}) — falling back to raw")
+            # Clean up failed SF attempt
+            for p in [_CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
+                      _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP]:
+                try: await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, p, response=False)
+                except Exception: pass
+            self._using_sf = False
+            await asyncio.sleep(0.3)
+
+        # ── 2b. Raw acc/gyro fallback ──────────────────────────────────────────
+        print("[sensor] Starting raw acc/gyro streaming…")
+        for label, payload in [
+            ("ACC_CONFIG",    _CMD_ACC_CONFIG),
+            ("GYRO_CONFIG",   _CMD_GYRO_CONFIG),
+            ("ACC_DATA_SUB",  _CMD_ACC_DATA_SUB),
+            ("GYRO_DATA_SUB", _CMD_GYRO_DATA_SUB),
+            ("ACC_SUBSCRIBE", _CMD_ACC_SUBSCRIBE),
+            ("GYRO_SUBSCRIBE",_CMD_GYRO_SUBSCRIBE),
+            ("ACC_START",     _CMD_ACC_START),
+            ("GYRO_START",    _CMD_GYRO_START),
+        ]:
+            await _send(label, payload)
+            await asyncio.sleep(0.12)
+        await asyncio.sleep(0.25)
+        self._streaming = True
+        logger.info("Streaming started (raw acc/gyro).")
+
+        for _ in range(14):   # up to 2 s
+            await asyncio.sleep(0.15)
             if self._acc_notify_count > 0 or self._gyro_notify_count > 0:
-                print(f"[sensor] Received IMU notifications after retry — acc={self._acc_notify_count} gyro={self._gyro_notify_count}")
+                print(f"[sensor] ✓ Raw IMU data flowing — acc={self._acc_notify_count} gyro={self._gyro_notify_count}")
                 return
-            else:
-                print("[sensor] Still no IMU notifications after retry. Check firmware/permissions or try connecting with the official MetaWear SDK.")
-        except Exception as e:
-            print(f"[sensor] Retry (no-response) failed: {e}")
+
+        print("[sensor] No raw notifications — retrying without response…")
+        for payload in [_CMD_ACC_CONFIG, _CMD_GYRO_CONFIG,
+                        _CMD_ACC_DATA_SUB, _CMD_GYRO_DATA_SUB,
+                        _CMD_ACC_SUBSCRIBE, _CMD_GYRO_SUBSCRIBE,
+                        _CMD_ACC_START, _CMD_GYRO_START]:
+            try:
+                await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, payload, response=False)
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+        await asyncio.sleep(1.0)
+        print(f"[sensor] After retry: acc={self._acc_notify_count} gyro={self._gyro_notify_count}")
 
     async def stop_streaming(self) -> None:
         if not self._connected or not self._client:
             return
         cmd = self._client.write_gatt_char
-        # SDK teardown order: stop → disable_sampling → datasignal_unsubscribe
-        for payload in [
-            _CMD_ACC_STOP,  _CMD_ACC_UNSUB,  _CMD_ACC_DATA_UNSUB,
-            _CMD_GYRO_STOP, _CMD_GYRO_UNSUB, _CMD_GYRO_DATA_UNSUB,
-        ]:
-            try:
-                await cmd(METAWEAR_COMMAND_CHAR_UUID, payload, response=False)
-            except Exception:
-                pass
+        if self._using_sf:
+            for payload in [
+                _CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
+                _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP,
+            ]:
+                try:
+                    await cmd(METAWEAR_COMMAND_CHAR_UUID, payload, response=False)
+                except Exception:
+                    pass
+        else:
+            for payload in [
+                _CMD_ACC_STOP,  _CMD_ACC_UNSUB,  _CMD_ACC_DATA_UNSUB,
+                _CMD_GYRO_STOP, _CMD_GYRO_UNSUB, _CMD_GYRO_DATA_UNSUB,
+            ]:
+                try:
+                    await cmd(METAWEAR_COMMAND_CHAR_UUID, payload, response=False)
+                except Exception:
+                    pass
         # Turn off LED
         try:
             await cmd(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP, response=False)
@@ -553,6 +704,42 @@ class MetaMotionSensor:
         except Exception as e:
             print(f"[sensor] _async_vibrate failed: {e}")
 
+    async def _async_write(self, payload: bytes) -> None:
+        """Fire-and-forget GATT write (used for read-trigger commands)."""
+        if not self._client or not self._connected:
+            return
+        try:
+            await self._client.write_gatt_char(
+                METAWEAR_COMMAND_CHAR_UUID, payload, response=True
+            )
+        except Exception as e:
+            print(f"[sensor] write failed ({payload.hex()}): {e}")
+
+    async def _async_save_calibration(self) -> None:
+        """Read current sensor-fusion cal data via BLE, then write it back to NVM."""
+        if not self._client or not self._connected:
+            return
+        try:
+            self._pending_cal_data = b''
+            await self._client.write_gatt_char(
+                METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_READ_CAL_DATA, response=True
+            )
+            # Wait up to 500 ms for the notification containing the cal bytes
+            for _ in range(10):
+                await asyncio.sleep(0.05)
+                if self._pending_cal_data:
+                    break
+            if self._pending_cal_data:
+                nvm_cmd = bytes([_MODULE_SENSOR_FUSION, 0x0C]) + self._pending_cal_data
+                await self._client.write_gatt_char(
+                    METAWEAR_COMMAND_CHAR_UUID, nvm_cmd, response=True
+                )
+                print(f"[sensor] Calibration saved to NVM ({len(self._pending_cal_data)} bytes)")
+            else:
+                print("[sensor] No calibration data received — NVM save skipped")
+        except Exception as e:
+            print(f"[sensor] _async_save_calibration failed: {e}")
+
     # ── Notification parsing ───────────────────────────────────────────────────
 
     def _notification_handler(self, _sender, data: bytearray) -> None:
@@ -568,9 +755,9 @@ class MetaMotionSensor:
             return
 
         self._notify_count += 1
-        # Print the first few notifications to help debugging, then fall back
-        # to a periodic summary every 100 notifications.
-        if self._notify_count <= 20 or self._notify_count % 100 == 0:
+        # Print first 20 notifications + any SF module notification (always log SF)
+        is_sf = (len(data) >= 2 and data[0] == _MODULE_SENSOR_FUSION)
+        if self._notify_count <= 20 or self._notify_count % 100 == 0 or is_sf:
             print(f"[sensor] notification #{self._notify_count}  module=0x{data[0]:02x} reg=0x{data[1]:02x}  len={len(data)}  raw={data[:8].hex()}")
 
         # signal the first notification to any waiter
@@ -591,6 +778,19 @@ class MetaMotionSensor:
         elif module == _MODULE_GYROSCOPE and reg == 0x05:
             self._gyro_notify_count += 1
             self._parse_gyro(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x04:   # CORRECTED_ACC
+            self._acc_notify_count += 1
+            self._parse_sf_corrected_acc(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x05:   # CORRECTED_GYRO
+            self._gyro_notify_count += 1
+            self._parse_sf_corrected_gyro(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x08:   # EULER_ANGLES
+            self._sf_notify_count += 1
+            self._parse_sf_euler(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x0B:   # CALIBRATION_STATE
+            self._parse_cal_state(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x0C:   # ACC_CAL_DATA (NVM read response)
+            self._parse_cal_data(data[2:])
         else:
             # Other notifications (module-info, etc.) are logged above.
             pass
@@ -611,13 +811,67 @@ class MetaMotionSensor:
         self._last_gyro = (x * _GYRO_SCALE, y * _GYRO_SCALE, z * _GYRO_SCALE)
         self._emit_sample()
 
+    def _parse_sf_corrected_acc(self, payload: bytearray) -> None:
+        """Parse SF CORRECTED_ACC: MblMwCorrectedCartesianFloat = 3×float32 + uint8 accuracy."""
+        if len(payload) < 12:
+            return
+        x, y, z = struct.unpack_from('<fff', payload[:12])
+        # Firmware outputs in g (same scale as raw acc ±4g range).
+        # Sanity-check: if magnitude >> 4 it's likely m/s² — convert to g.
+        mag_sq = x*x + y*y + z*z
+        if mag_sq > 16.0:
+            x /= 9.80665; y /= 9.80665; z /= 9.80665
+        self._last_acc = (x, y, z)
+        self._emit_sample()
+
+    def _parse_sf_corrected_gyro(self, payload: bytearray) -> None:
+        """Parse SF CORRECTED_GYRO: MblMwCorrectedCartesianFloat = 3×float32 + uint8 accuracy."""
+        if len(payload) < 12:
+            return
+        gx, gy, gz = struct.unpack_from('<fff', payload[:12])
+        self._last_gyro = (gx, gy, gz)
+        self._emit_sample()
+
+    def _parse_sf_euler(self, payload: bytearray) -> None:
+        """Parse MblMwEulerAngles: 4×float32 [heading, pitch, roll, yaw] from Bosch KF."""
+        if len(payload) < 12:
+            return
+        heading, pitch, roll = struct.unpack_from('<fff', payload[:12])
+        self._last_euler = (heading, pitch, roll, heading)
+        self._hw_fusion_valid = True
+        if self._sf_notify_count <= 5 or self._sf_notify_count % 500 == 0:
+            print(f"[sensor] SF euler #{self._sf_notify_count}  "
+                  f"heading={heading:.1f}° pitch={pitch:.1f}° roll={roll:.1f}°")
+
+    def _parse_cal_state(self, payload: bytearray) -> None:
+        """Parse [accel_cal, gyro_cal, mag_cal, sys_cal] sensor-fusion calibration state."""
+        if len(payload) < 3:
+            return
+        accel_cal = int(payload[0]) & 0x03
+        gyro_cal  = int(payload[1]) & 0x03
+        mag_cal   = int(payload[2]) & 0x03
+        old = self._mag_cal_state
+        self._mag_cal_state = mag_cal
+        if mag_cal != old:
+            print(f"[sensor] Mag cal: {old}→{mag_cal}  (accel={accel_cal} gyro={gyro_cal})")
+
+    def _parse_cal_data(self, payload: bytearray) -> None:
+        """Store raw calibration offset bytes received after a read-data request."""
+        self._pending_cal_data = bytes(payload)
+        print(f"[sensor] Cal data received ({len(payload)} bytes)")
+
     def _emit_sample(self) -> None:
         ax, ay, az = self._last_acc
         gx, gy, gz = self._last_gyro
+        hw_heading, hw_pitch, hw_roll, _ = self._last_euler
         sample = IMUSample(
             timestamp=time.monotonic(),
             ax=ax, ay=ay, az=az,
             gx=gx, gy=gy, gz=gz,
+            hw_heading=hw_heading,
+            hw_pitch=hw_pitch,
+            hw_roll=hw_roll,
+            hw_fusion_valid=self._hw_fusion_valid,
         )
         self._sample_count += 1
         if self._sample_count % 50 == 1:

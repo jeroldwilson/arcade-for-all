@@ -43,6 +43,26 @@ TICK_CLR     = (140, 170, 200)
 TICK_DIM_CLR = (60,  85, 115)
 PITCH_LINE   = (200, 200, 200)
 
+# Pre-Flight Systems Check — signal-strength gauge state colours
+_PF_COLORS = [
+    (220,  50,  50),   # 0 = red    "System Offline"
+    (220, 180,  50),   # 1 = yellow "Signal Weak"
+    ( 50, 120, 220),   # 2 = blue   "Signal Stabilizing"
+    ( 50, 220, 100),   # 3 = green  "Ready for Takeoff"
+]
+_PF_LABELS = [
+    "SEARCHING...",       # 0 — arc proxy not yet accumulated; avoids alarming "offline" flash
+    "SIGNAL WEAK",        # 1
+    "SIGNAL STABILIZING", # 2
+    "READY FOR TAKEOFF",  # 3
+]
+
+_BEARINGS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+def _heading_to_bearing(deg: float) -> str:
+    """Convert 0-360° heading to 8-point compass label."""
+    return _BEARINGS[int((deg % 360 + 22.5) / 45) % 8]
+
 
 class CalibrationGame:
     """
@@ -69,6 +89,22 @@ class CalibrationGame:
         self._fusion_warmup: float = 0.0    # countdown seconds remaining
         self._fusion_ready: bool = False
         self._fig8_t: float = 0.0    # animation phase for figure-8 guide
+
+        # Pre-Flight Systems Check (BMM150 magnetometer calibration, states 0-3)
+        self._pf_state: int = 0
+        self._pf_prev_state: int = -1   # -1 forces initial stall-timer reset
+        self._pf_stall_timer: float = 10.0
+        self._pf_show_helper: bool = False
+        self._pf_complete: bool = False
+        self._pf_haptic_sent: bool = False
+        self._pf_takeoff_t: float = 0.0   # seconds since takeoff animation started
+        # Keyboard-mode simulation: auto-advance state every ~6 s
+        self._pf_sim_state: int = 0
+        self._pf_sim_timer: float = 6.0
+        # Arc-proxy: total rotation accumulated while doing wide arcs (degrees)
+        # Used when hardware sensor-fusion module isn't running (most setups).
+        # Thresholds: 350° / 800° / 1400° of cumulative rotation → states 1 / 2 / 3
+        self._pf_arc_total: float = 0.0
 
         self._init_layout()
 
@@ -142,6 +178,9 @@ class CalibrationGame:
             gy = gs.abs_gy
             gz = gs.abs_gz
 
+            # Update Pre-Flight Systems Check state machine
+            self._update_pre_flight(gs, dt, gesture_src)
+
             # Trigger fusion warmup once calibration completes (sensor mode only)
             if (gs.calibrated and not self._fusion_ready and self._fusion_warmup <= 0.0
                     and self._mode != "keyboard"):
@@ -154,8 +193,10 @@ class CalibrationGame:
                 if self._fusion_warmup <= 0.0:
                     self._fusion_ready = True
 
-            # Integrate yaw from gz (yaw-rate °/s × dt s)
+            # Integrate gz as fallback yaw (drifts without magnetometer)
             self._yaw_deg = (self._yaw_deg + gz * dt) % 360.0
+            # Hardware compass heading (Bosch KF + BMM150) overrides when fusion is active
+            yaw_display = gs.hw_heading if gs.hw_fusion_valid else self._yaw_deg
             if self._mode_toast > 0:
                 self._mode_toast = max(0.0, self._mode_toast - dt)
 
@@ -165,15 +206,16 @@ class CalibrationGame:
             pitch_deg = math.degrees(math.atan2(-ax, math.sqrt(ay ** 2 + az ** 2)))
             roll_deg  = math.degrees(math.atan2(ay, az))
 
-            # Use fusion euler angles if available (stable), else trig fallback
-            pitch_display = gs.euler_pitch if gs.euler_pitch != 0.0 else pitch_deg
-            roll_display = gs.euler_roll if gs.euler_roll != 0.0 else roll_deg
+            # Use hardware Euler angles when fusion is active, else trig fallback
+            pitch_display = gs.euler_pitch if gs.hw_fusion_valid else pitch_deg
+            roll_display  = gs.euler_roll  if gs.hw_fusion_valid else roll_deg
 
             self._draw(ax, ay, az, gx, gy, gz,
-                       pitch_display, roll_display, self._yaw_deg, gs.calibrated, gs)
+                       pitch_display, roll_display, yaw_display, gs.calibrated, gs)
             if self._debug:
                 draw_gesture_debug_overlay(
                     self._screen, gs, self._W, self._H, self._sc, self._font_big)
+                self._draw_sensor_status_overlay(gs)
             if self._mode_toast > 0:
                 sc    = self._sc
                 alpha = min(255, int(self._mode_toast / 2.5 * 255))
@@ -201,12 +243,14 @@ class CalibrationGame:
 
         self._draw_panel_header(self._panels[0], "FRONT VIEW  •  ROLL",  (0, 180, 255))
         self._draw_panel_header(self._panels[1], "SIDE VIEW  •  PITCH",  (100, 255, 160))
-        self._draw_panel_header(self._panels[2], "TOP VIEW  •  YAW",     AMBER_CLR)
+        hw_active = gs.hw_fusion_valid if gs else False
+        compass_hdr = "TOP VIEW  •  COMPASS" if hw_active else "TOP VIEW  •  YAW"
+        self._draw_panel_header(self._panels[2], compass_hdr,  AMBER_CLR)
         self._draw_panel_header(self._panels[3], "SENSOR DATA",          ACCENT_CLR)
 
         self._draw_front_view(inners[0], roll)
         self._draw_side_view(inners[1], pitch)
-        self._draw_top_view(inners[2], yaw)
+        self._draw_top_view(inners[2], yaw, hw_active=hw_active)
         self._draw_data_panel(inners[3], ax, ay, az, gx, gy, gz, pitch, roll, yaw, gs)
 
         if not calibrated:
@@ -214,6 +258,13 @@ class CalibrationGame:
 
         if self._fusion_warmup > 0.0:
             self._draw_fusion_warmup_overlay(self._fusion_warmup)
+
+        # Pre-Flight Systems Check overlays (shown after IMU calibration settles)
+        if calibrated and self._fusion_warmup <= 0.0:
+            if self._pf_complete and self._pf_takeoff_t < 4.0:
+                self._draw_takeoff_animation()
+            elif not self._pf_complete:
+                self._draw_pre_flight_overlay()
 
     def _draw_dividers(self) -> None:
         sw, sh = self._W, self._H
@@ -388,7 +439,7 @@ class CalibrationGame:
 
     # ── Panel 3 — Top View (Yaw / Compass) ───────────────────────────────────
 
-    def _draw_top_view(self, area: pygame.Rect, yaw_deg: float) -> None:
+    def _draw_top_view(self, area: pygame.Rect, yaw_deg: float, hw_active: bool = False) -> None:
         cx, cy = area.centerx, area.centery - max(6, int(10 * self._sc))
         r = min(area.width, area.height) // 2 - max(4, int(8 * self._sc))
 
@@ -435,8 +486,14 @@ class CalibrationGame:
         # Airplane top silhouette (rotates with yaw)
         self._draw_airplane_top(cx, cy, r, yaw_deg)
 
-        lbl = self._font_label.render(
-            f"Yaw: {yaw_deg:.1f}°   SPACE=reset", True, TEXT_CLR)
+        if hw_active:
+            bearing = _heading_to_bearing(yaw_deg)
+            lbl_txt = f"Heading: {yaw_deg:.1f}°  {bearing}  [COMPASS]"
+            lbl_clr = GREEN_CLR
+        else:
+            lbl_txt = f"Yaw: {yaw_deg:.1f}°  SPACE=reset  [gyro]"
+            lbl_clr = TEXT_CLR
+        lbl = self._font_label.render(lbl_txt, True, lbl_clr)
         self._screen.blit(lbl, lbl.get_rect(
             centerx=cx, top=area.bottom - max(16, int(18 * self._sc))))
 
@@ -516,6 +573,12 @@ class CalibrationGame:
         qx = gs.qx if gs else 0.0
         qy = gs.qy if gs else 0.0
         qz = gs.qz if gs else 0.0
+        # Magnetometer / hardware fusion data
+        hw_heading_val  = gs.hw_heading      if gs else 0.0
+        hw_valid        = gs.hw_fusion_valid if gs else False
+        mag_cal         = gs.mag_cal_state   if gs else 0
+        _CAL_LABELS = ["UNCAL", "WEAK", "GOOD", "LOCKED"]
+        bearing_str = _heading_to_bearing(hw_heading_val) if hw_valid else "---"
 
         rows = [
             ("ATTITUDE",              None,       None),
@@ -540,6 +603,15 @@ class CalibrationGame:
             ("  AV mag",  f"{av_mag:+7.1f} °/s",     TEXT_CLR),
             (f"  q={qw:+.2f},{qx:+.2f},{qy:+.2f},{qz:+.2f}", None, DIM_CLR),
             ("",                      None,       None),
+            ("",                      None,       None),
+            ("MAGNETOMETER",          None,       None),
+            ("  Heading", f"{hw_heading_val:7.1f}°  {bearing_str}",
+                          GREEN_CLR if hw_valid else DIM_CLR),
+            ("  Cal",     f"{mag_cal}/3  {_CAL_LABELS[mag_cal]}",
+                          _PF_COLORS[mag_cal]),
+            ("  Source",  "HW COMPASS" if hw_valid else "SW FALLBACK",
+                          GREEN_CLR if hw_valid else WARN_CLR),
+            ("",                      None,       None),
             ("CONTROLS",              None,       None),
             ("  ESC",     "home",                DIM_CLR),
             ("  SPACE",   "reset yaw",           DIM_CLR),
@@ -563,6 +635,198 @@ class CalibrationGame:
             y += lh
             if y > area.bottom - lh:
                 break
+
+    # ── Pre-Flight Systems Check ──────────────────────────────────────────────
+
+    def _update_pre_flight(self, gs, dt: float, gesture_src) -> None:
+        """State-machine for BMM150 magnetometer calibration progress.
+
+        Priority order for effective_state:
+          1. Real hardware mag_cal_state (BLE sensor-fusion module, 0x19) if > 0
+          2. Arc-proxy: total rotation °, thresholds 350/800/1400 → states 1/2/3
+          3. Timer fallback for keyboard mode (av_magnitude is always 0)
+        """
+        if self._mode == "keyboard":
+            # No sensor — advance on a timer so the demo is still playable
+            self._pf_sim_timer -= dt
+            if self._pf_sim_timer <= 0.0 and self._pf_sim_state < 3:
+                self._pf_sim_state += 1
+                self._pf_sim_timer = 6.0
+            effective_state = self._pf_sim_state
+        elif gs.mag_cal_state > 0:
+            # Hardware sensor-fusion module is responding — use the real value
+            effective_state = gs.mag_cal_state
+        else:
+            # Sensor-fusion module not started or no magnetometer on this variant.
+            # Use cumulative angular velocity as a proxy: the child steering in
+            # wide arcs accumulates degrees and advances through the states.
+            _ARC_THRESHOLDS = (350.0, 800.0, 1400.0)  # °  for states 1, 2, 3
+            self._pf_arc_total += gs.av_magnitude * dt
+            if self._pf_arc_total >= _ARC_THRESHOLDS[2]:
+                effective_state = 3
+            elif self._pf_arc_total >= _ARC_THRESHOLDS[1]:
+                effective_state = 2
+            elif self._pf_arc_total >= _ARC_THRESHOLDS[0]:
+                effective_state = 1
+            else:
+                effective_state = 0
+
+        # Reset stall timer whenever the state advances
+        if effective_state != self._pf_prev_state:
+            self._pf_stall_timer = 10.0
+            self._pf_show_helper = False
+            self._pf_prev_state  = effective_state
+        self._pf_state = effective_state
+
+        if not self._pf_complete:
+            if effective_state < 3:
+                self._pf_stall_timer = max(0.0, self._pf_stall_timer - dt)
+                if self._pf_stall_timer <= 0.0:
+                    self._pf_show_helper = True
+                    self._pf_stall_timer = 10.0  # re-arm so the prompt doesn't flicker
+            else:
+                self._pf_complete = True
+                if not self._pf_haptic_sent:
+                    self._pf_haptic_sent = True
+                    gesture_src.vibrate(0.5)
+                    # Only write to NVM if hardware sensor-fusion provided real cal data
+                    # (gs.mag_cal_state > 0). Sending the NVM write without sensor fusion
+                    # running can reconfigure the gyro and break all subsequent streaming.
+                    if gs.mag_cal_state > 0:
+                        gesture_src.save_calibration_to_nvm()
+
+        if self._pf_complete:
+            self._pf_takeoff_t += dt
+
+    def _draw_signal_gauge(self, cx: int, cy: int, state: int) -> None:
+        """
+        Draw 4 vertical signal-strength bars (like a mobile signal icon).
+        Bars 1-4 light up progressively as state 0→3 is reached.
+        """
+        sc    = self._sc
+        n     = 4
+        bar_w = max(10, int(18 * sc))
+        gap   = max(4,  int(7  * sc))
+        total_w = n * bar_w + (n - 1) * gap
+        base_h  = max(12, int(20 * sc))   # shortest bar height step
+
+        color_active = _PF_COLORS[min(state, 3)]
+        color_dim    = (35, 50, 70)
+
+        for i in range(n):
+            bar_h  = base_h * (i + 1)
+            bx     = cx - total_w // 2 + i * (bar_w + gap)
+            by     = cy - bar_h
+            filled = i < (state + 1)   # bar i is lit when state >= i
+            color  = color_active if filled else color_dim
+            pygame.draw.rect(self._screen, color,
+                             (bx, by, bar_w, bar_h), border_radius=max(2, int(3 * sc)))
+
+    def _draw_pre_flight_overlay(self) -> None:
+        """Semi-transparent 'Pre-Flight Systems Check' overlay with signal gauge and prompts."""
+        overlay = pygame.Surface((self._W, self._H), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 165))
+        self._screen.blit(overlay, (0, 0))
+
+        cx, cy = self._W // 2, self._H // 2
+        sc = self._sc
+
+        # Title
+        title = self._font_big.render("PRE-FLIGHT SYSTEMS CHECK", True, ACCENT_CLR)
+        self._screen.blit(title, title.get_rect(center=(cx, int(cy - 110 * sc))))
+
+        sub = self._font_label.render("Drone Pilot Dashboard  •  Compass Lock", True, DIM_CLR)
+        self._screen.blit(sub, sub.get_rect(center=(cx, int(cy - 85 * sc))))
+
+        # Signal-strength gauge (vertical bars)
+        gauge_cy = int(cy - 30 * sc)
+        self._draw_signal_gauge(cx, gauge_cy, self._pf_state)
+
+        # Gauge bar labels (tiny, below the bars)
+        bar_labels = ["0", "1", "2", "3"]
+        n, bar_w, gap = 4, max(10, int(18 * sc)), max(4, int(7 * sc))
+        total_w = n * bar_w + (n - 1) * gap
+        base_h_max = max(12, int(20 * sc)) * n  # tallest bar height for spacing
+        for i, lbl in enumerate(bar_labels):
+            lx = cx - total_w // 2 + i * (bar_w + gap) + bar_w // 2
+            ly = gauge_cy + max(4, int(6 * sc))
+            s  = self._font_small.render(lbl, True, DIM_CLR)
+            self._screen.blit(s, s.get_rect(centerx=lx, top=ly))
+
+        # State label (colour-coded)
+        label_color = _PF_COLORS[min(self._pf_state, 3)]
+        lbl = self._font_big.render(_PF_LABELS[min(self._pf_state, 3)], True, label_color)
+        self._screen.blit(lbl, lbl.get_rect(center=(cx, int(cy + 20 * sc))))
+
+        # Stall timer progress bar (10 s countdown until helper prompt)
+        if not self._pf_show_helper:
+            pct  = self._pf_stall_timer / 10.0
+            bw   = int(260 * sc)
+            bh   = max(5, int(7 * sc))
+            bx   = cx - bw // 2
+            by   = int(cy + 45 * sc)
+            pygame.draw.rect(self._screen, (30, 45, 65), (bx, by, bw, bh), border_radius=3)
+            pygame.draw.rect(self._screen, label_color,  (bx, by, int(bw * pct), bh), border_radius=3)
+            hint = self._font_small.render("Steer the drone in wide arcs!", True, TEXT_CLR)
+            self._screen.blit(hint, hint.get_rect(center=(cx, int(cy + 60 * sc))))
+
+        # Helper prompt (shown when child stalls for 10 s without progress)
+        if self._pf_show_helper:
+            hbg = pygame.Surface((int(480 * sc), int(75 * sc)), pygame.SRCALPHA)
+            hbg.fill((255, 200, 0, 45))
+            self._screen.blit(hbg, hbg.get_rect(center=(cx, int(cy + 65 * sc))))
+            h1 = self._font_data.render("Ask an adult to help!", True, AMBER_CLR)
+            h2 = self._font_label.render(
+                "Hold the sensor and rotate in a full 360° circle.", True, TEXT_CLR)
+            self._screen.blit(h1, h1.get_rect(center=(cx, int(cy + 52 * sc))))
+            self._screen.blit(h2, h2.get_rect(center=(cx, int(cy + 74 * sc))))
+
+    def _draw_takeoff_animation(self) -> None:
+        """High-contrast 'Ready for Takeoff' success animation with rising airplane."""
+        t  = self._pf_takeoff_t
+        sc = self._sc
+        cx, cy = self._W // 2, self._H // 2
+
+        # High-contrast dark-green background
+        bg = pygame.Surface((self._W, self._H))
+        bg.fill((0, 18, 8))
+        self._screen.blit(bg, (0, 0))
+
+        # Pulsing "READY FOR TAKEOFF!" headline
+        pulse = 0.5 + 0.5 * math.sin(t * 5.0)
+        g_val = int(180 + 75 * pulse)
+        headline = self._font_big.render("READY FOR TAKEOFF!", True, (50, g_val, 80))
+        self._screen.blit(headline, headline.get_rect(center=(cx, int(cy - 70 * sc))))
+
+        # Confirmation message (fades in at 1.5 s)
+        if t > 1.5:
+            fade      = min(1.0, (t - 1.5) / 0.5)
+            save_surf = self._font_data.render(
+                "Compass lock achieved — calibration complete!", True, GREEN_CLR)
+            save_surf.set_alpha(int(fade * 220))
+            self._screen.blit(save_surf, save_surf.get_rect(center=(cx, int(cy - 38 * sc))))
+
+        # Animated airplane rising from bottom toward top
+        rise   = min(t / 3.0, 1.0)
+        ease   = rise * rise * (3.0 - 2.0 * rise)   # smoothstep
+        plane_y = int(self._H * 0.88 - (self._H * 0.80) * ease)
+        r_plane = max(20, int(48 * sc))
+        self._draw_airplane_top(cx, plane_y, r_plane, yaw_deg=0.0)
+
+        # Vapour-trail dots
+        n_trail = 6
+        for i in range(n_trail):
+            trail_y = plane_y + int((i + 1) * 22 * sc)
+            alpha_t = max(0, 180 - i * 30)
+            dot_r   = max(2, int((n_trail - i) * 2 * sc))
+            dot_s   = pygame.Surface((dot_r * 2, dot_r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(dot_s, (50, 220, 100, alpha_t), (dot_r, dot_r), dot_r)
+            self._screen.blit(dot_s, (cx - dot_r, trail_y - dot_r))
+
+        # "Signal: LOCKED" indicator bottom-centre
+        lock_surf = self._font_label.render("SIGNAL LOCKED  ●  STATE 3 / 3", True, GREEN_CLR)
+        self._screen.blit(lock_surf, lock_surf.get_rect(
+            center=(cx, self._H - max(20, int(28 * sc)))))
 
     # ── Calibrating overlay ───────────────────────────────────────────────────
 
@@ -628,3 +892,88 @@ class CalibrationGame:
         countdown = self._font_big.render(f"{warmup_remaining:.0f}s", True, WARN_CLR)
         self._screen.blit(countdown, countdown.get_rect(
             center=(cx, int(cy + 100 * sc))))
+
+    # ── Debug: sensor status overlay ─────────────────────────────────────────
+
+    def _draw_sensor_status_overlay(self, gs) -> None:
+        """Debug panel (top-right): lists every sensor with ACTIVE / INACTIVE status."""
+        sc = self._sc
+        lh = max(17, int(20 * sc))
+        pad = max(5, int(7 * sc))
+
+        _CAL_COLORS = [(220, 50, 50), (220, 180, 50), (50, 120, 220), (50, 220, 100)]
+        _CAL_LABEL  = ["UNCAL", "WEAK", "GOOD", "LOCKED"]
+
+        acc_on  = gs.calibrated
+        gyro_on = gs.calibrated and gs.av_magnitude >= 0   # always true once calibrated
+        sf_on   = gs.hw_fusion_valid
+        mag_on  = gs.hw_fusion_valid   # BMM150 is fed through module 0x19
+        cal     = gs.mag_cal_state
+
+        # Each entry: (chip label, description, active, colour-when-on)
+        rows = [
+            ("Accelerometer", "BMI160/270  mod 0x03", acc_on,  (100, 200, 255)),
+            ("Gyroscope",     "BMI160/270  mod 0x13", gyro_on, (100, 200, 255)),
+            ("Sensor Fusion", "Bosch KF    mod 0x19", sf_on,   ( 80, 255, 180)),
+            ("Magnetometer",  "BMM150      via 0x19", mag_on,  ( 80, 255, 180)),
+        ]
+
+        # Measure widest line to size the panel
+        test_line = "Sensor Fusion  INACTIVE  [Bosch KF    mod 0x19]"
+        tw = self._font_label.size(test_line)[0]
+        panel_w = tw + pad * 2
+        # rows + header + cal row + heading row + bottom pad
+        n_lines = len(rows) + 3
+        panel_h = lh * n_lines + pad * 2 + lh
+
+        # Position: top-right, below gesture debug bar (~64 px)
+        gesture_bar_h = max(48, int(64 * sc))
+        px = self._W - panel_w - pad
+        py = gesture_bar_h + pad
+
+        bg = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 200))
+        pygame.draw.rect(bg, (40, 80, 120, 230), (0, 0, panel_w, panel_h), 1)
+        self._screen.blit(bg, (px, py))
+
+        y = py + pad
+
+        # Header
+        hdr = self._font_data.render("SENSOR STATUS", True, ACCENT_CLR)
+        self._screen.blit(hdr, (px + pad, y))
+        y += lh
+
+        # Separator line
+        pygame.draw.line(self._screen, PANEL_BORDER,
+                         (px + pad, y - 3), (px + panel_w - pad, y - 3), 1)
+
+        for name, chip, active, on_clr in rows:
+            dot    = "●" if active else "○"
+            status = "ACTIVE  " if active else "INACTIVE"
+            clr    = on_clr if active else (90, 90, 90)
+            line   = f"{dot} {name:<15}  {status}  [{chip}]"
+            surf   = self._font_label.render(line, True, clr)
+            self._screen.blit(surf, (px + pad, y))
+            y += lh
+
+        # Separator
+        pygame.draw.line(self._screen, PANEL_BORDER,
+                         (px + pad, y - 2), (px + panel_w - pad, y - 2), 1)
+
+        # Calibration state
+        cal_clr  = _CAL_COLORS[min(cal, 3)]
+        cal_text = f"  Mag Cal:  {cal}/3  {_CAL_LABEL[min(cal, 3)]}"
+        self._screen.blit(
+            self._font_label.render(cal_text, True, cal_clr), (px + pad, y))
+        y += lh
+
+        # Hardware heading (only meaningful when fusion active)
+        if sf_on:
+            bearing  = _heading_to_bearing(gs.hw_heading)
+            hdg_text = f"  Heading:  {gs.hw_heading:6.1f}°  {bearing}"
+            hdg_clr  = (50, 220, 100)
+        else:
+            hdg_text = "  Heading:  ---  (fusion inactive)"
+            hdg_clr  = (90, 90, 90)
+        self._screen.blit(
+            self._font_label.render(hdg_text, True, hdg_clr), (px + pad, y))

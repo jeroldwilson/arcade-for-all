@@ -152,6 +152,11 @@ class GestureState:
     slice_active: bool = False
     slice_direction: str = ""
     combo_count: int = 0
+    # BMM150 magnetometer calibration state (0 = offline … 3 = fully calibrated)
+    mag_cal_state: int = 0
+    # Bosch Kalman Filter hardware outputs (drift-free when hw_fusion_valid=True)
+    hw_heading: float = 0.0        # compass heading 0-360° (absolute, drift-free yaw)
+    hw_fusion_valid: bool = False  # True once hardware fusion data is arriving
 
 
 # ── Main interpreter ──────────────────────────────────────────────────────────
@@ -169,6 +174,7 @@ class GestureInterpreter:
         self,
         sensor_queue: queue.Queue,
         config: Optional[GestureConfig] = None,
+        sensor=None,
     ):
         self._q        = sensor_queue
         self.config    = config or GestureConfig()
@@ -197,6 +203,10 @@ class GestureInterpreter:
         self._thread: Optional[threading.Thread] = None
         self._sample_count: int = 0
 
+        # Optional sensor reference for mag calibration polling
+        self._sensor = sensor
+        self._mag_cal_poll_next: float = 0.0
+
         # Sensor fusion and slice detection
         self._fusion: FusionProcessor = FusionProcessor()
         self._slice: SliceDetector = SliceDetector()
@@ -215,6 +225,16 @@ class GestureInterpreter:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2)
+
+    def vibrate(self, duration: float = 0.15) -> None:
+        """Trigger haptic buzz on the sensor (no-op if no sensor attached)."""
+        if self._sensor is not None:
+            self._sensor.vibrate(duration)
+
+    def save_calibration_to_nvm(self) -> None:
+        """Persist current magnetometer calibration offsets to sensor NVM."""
+        if self._sensor is not None:
+            self._sensor.save_calibration_to_nvm()
 
     def recalibrate(self) -> None:
         """Force a new calibration cycle (call when sensor position changes)."""
@@ -254,6 +274,9 @@ class GestureInterpreter:
                 slice_active=self.state.slice_active,
                 slice_direction=self.state.slice_direction,
                 combo_count=self.state.combo_count,
+                mag_cal_state=self.state.mag_cal_state,
+                hw_heading=self.state.hw_heading,
+                hw_fusion_valid=self.state.hw_fusion_valid,
             )
 
     # ── Processing loop ────────────────────────────────────────────────────────
@@ -361,6 +384,17 @@ class GestureInterpreter:
         fusion_state = self._fusion.process(s, dt_fusion)
         slice_event  = self._slice.update(s.gx, s.gy, s.gz, t=now_ts)
 
+        # Use Bosch Kalman Filter Euler angles when hardware fusion is active;
+        # fall back to software Madgwick (roll/pitch stable, yaw drifts without mag).
+        if s.hw_fusion_valid:
+            euler_roll  = s.hw_roll
+            euler_pitch = s.hw_pitch
+            euler_yaw   = s.hw_heading   # compass heading — absolute, drift-free
+        else:
+            euler_roll  = fusion_state.euler_roll_deg
+            euler_pitch = fusion_state.euler_pitch_deg
+            euler_yaw   = fusion_state.euler_yaw_deg
+
         # ── Publish ────────────────────────────────────────────────────────
         with self._lock:
             self.state.paddle_velocity = velocity
@@ -377,19 +411,25 @@ class GestureInterpreter:
             self.state.abs_gx          = s.gx
             self.state.abs_gy          = s.gy
             self.state.abs_gz          = s.gz
-            # Sensor fusion outputs
+            # Sensor fusion outputs (hardware when available, software fallback)
             self.state.qw              = fusion_state.qw
             self.state.qx              = fusion_state.qx
             self.state.qy              = fusion_state.qy
             self.state.qz              = fusion_state.qz
-            self.state.euler_roll      = fusion_state.euler_roll_deg
-            self.state.euler_pitch     = fusion_state.euler_pitch_deg
-            self.state.euler_yaw       = fusion_state.euler_yaw_deg
+            self.state.euler_roll      = euler_roll
+            self.state.euler_pitch     = euler_pitch
+            self.state.euler_yaw       = euler_yaw
             self.state.av_magnitude    = fusion_state.av_magnitude
             # Slice detection outputs
             self.state.slice_active    = slice_event is not None
             self.state.slice_direction = slice_event.direction if slice_event else ""
             self.state.combo_count     = self._slice.combo_count
+
+            # Mirror sensor state passively — never send BLE commands from this thread.
+            if self._sensor is not None:
+                self.state.mag_cal_state   = self._sensor.mag_cal_state
+            self.state.hw_heading      = s.hw_heading
+            self.state.hw_fusion_valid = s.hw_fusion_valid
 
         # Log every 10th sample (~10 Hz at 100 Hz sensor rate)
         self._sample_count += 1
@@ -436,6 +476,9 @@ class KeyboardFallback:
                 calibrated=True,
                 tilt_y=0.0,
             )
+
+    def vibrate(self, duration: float = 0.15) -> None: pass
+    def save_calibration_to_nvm(self) -> None: pass
 
     # Lifecycle stubs (no-ops for API compatibility)
     def start(self) -> None: pass

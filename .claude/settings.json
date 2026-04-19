@@ -5,7 +5,15 @@
       "Bash(find /Users/jerold/dev/Bricks/data -name *.pkl -o -name *.json)",
       "Bash(python3 -c \"from sklearn.ensemble import RandomForestClassifier; print\\(''sklearn OK''\\)\")",
       "Bash(pip install:*)",
-      "Bash(python3 -c \":*)"
+      "Bash(python3 -c \":*)",
+      "Bash(python -c 'import ast, sys *)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from shared.sensor import MetaMotionSensor, IMUSample; from shared.gesture import GestureInterpreter, GestureState, KeyboardFallback; gs = GestureState\\(\\); print\\('hw_heading:', gs.hw_heading, 'hw_fusion_valid:', gs.hw_fusion_valid, 'mag_cal_state:', gs.mag_cal_state\\); s = IMUSample\\(\\); print\\('IMUSample hw_fusion_valid:', s.hw_fusion_valid, 'hw_heading:', s.hw_heading\\)\")",
+      "WebFetch(domain:mbientlab.com)",
+      "Bash(python -c \"from shared.sensor import MetaMotionSensor, IMUSample; from shared.gesture import GestureInterpreter, GestureState; print\\('imports OK'\\); s = IMUSample\\(\\); print\\('hw_fusion_valid:', s.hw_fusion_valid\\)\")",
+      "Bash(python -c \"from shared.sensor import MetaMotionSensor, IMUSample; from shared.gesture import GestureInterpreter, GestureState; s = MetaMotionSensor\\(\\); print\\('_using_sf:', s._using_sf\\); print\\('imports OK'\\)\")",
+      "WebSearch",
+      "WebFetch(domain:api.github.com)"
     ]
   }
 }

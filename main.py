@@ -211,7 +211,7 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
         return gs, None
 
     cfg = GestureConfig()
-    gs  = GestureInterpreter(sensor.data_queue, cfg)
+    gs  = GestureInterpreter(sensor.data_queue, cfg, sensor=sensor)
     gs.start()
     print("[main] Gesture interpreter started.")
     return gs, sensor
