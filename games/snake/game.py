@@ -7,6 +7,8 @@ Controls
                  Tilt wrist FORWARD/BACK to turn up/down.
   Keyboard mode: Arrow keys for all 4 directions.
   Both modes   : ESC = pause / back to menu, R = restart, H = home.
+                 L = learn mode, T = test mode, V = validation panel (test).
+                 G = guided/manual learn toggle (in learn mode).
 
 Design decisions
 ────────────────
@@ -25,6 +27,13 @@ from enum import Enum
 from typing import Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.learn_test_support import (
+    GuidedLearnFlow,
+    build_validation_lines,
+    draw_submode_indicator,
+    draw_validation_panel,
+    synthetic_target_xy,
+)
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -91,17 +100,63 @@ class SnakeGame:
         mode: str = "standard",
         audio=None,
         username: str = "",
+        game_submode: str = "play",   # "play" | "learn" | "test"
     ):
         self._clock    = clock
         self._debug    = debug
         self._mode     = mode
         self._audio    = audio
         self._username = username
+        self._game_submode = game_submode
+        self._show_validation: bool = False
+        self._sklearn_missing: bool = False
+        self._learner = None
+        self._guided = GuidedLearnFlow(("right", "left", "up", "down"), per_direction_target=8)
         self._gesture_src = None
         self._mode_toast: float = 0.0
         self._mode_toast_msg: str = ""
+        if game_submode in ("learn", "test"):
+            self._init_learner()
+        if game_submode == "test" and self._learner is not None:
+            self._learner.start_validation()
+            self._show_validation = True
         self._init_layout(screen)
         self._reset()
+
+    def _init_learner(self) -> None:
+        if self._learner is not None:
+            return
+        try:
+            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            if not SKLEARN_AVAILABLE:
+                self._sklearn_missing = True
+                print("[snake] scikit-learn not installed — learn/test mode unavailable.")
+                return
+            self._learner = GestureLearningSystem(username=self._username)
+            self._sklearn_missing = False
+        except ImportError as exc:
+            self._sklearn_missing = True
+            print(f"[snake] Import error: {exc}")
+
+    def _switch_submode(self, new_mode: str) -> None:
+        if new_mode == self._game_submode:
+            return
+        if self._learner is not None and self._game_submode in ("learn", "test"):
+            self._learner.save_and_train()
+        self._game_submode = new_mode
+        self._show_validation = False
+        if new_mode in ("learn", "test"):
+            self._init_learner()
+        if new_mode == "test" and self._learner is not None:
+            self._learner.start_validation()
+            self._show_validation = True
+        if new_mode == "learn":
+            self._guided.reset(enable=True)
+            if self._learner is not None:
+                self._guided.sync_baseline(self._learner.class_counts)
+        labels = {"play": "REGULAR MODE", "learn": "LEARN MODE", "test": "TEST MODE"}
+        self._mode_toast_msg = labels.get(new_mode, new_mode.upper())
+        self._mode_toast = 2.5
 
     def _init_layout(self, screen: pygame.Surface) -> None:
         """Compute all screen-size-dependent layout variables."""
@@ -146,6 +201,8 @@ class SnakeGame:
             dt = self._clock.tick(FPS) / 1000.0
             result = self._handle_events()
             if result:
+                if self._learner is not None:
+                    self._learner.save_and_train()
                 if self._audio:
                     self._audio.stop_background()
                 return result
@@ -197,12 +254,22 @@ class SnakeGame:
         if new_dir != self._direction.opposite():
             self._next_dir = new_dir
 
-    def _read_gesture(self) -> None:
+    def _read_gesture(self, gs, dt: float) -> None:
         """Map GestureState tilt to a direction change (edge-triggered)."""
-        if self._gesture_src is None:
+        if gs is None:
             return
-        gs = self._gesture_src.get_state()
         if not gs.calibrated:
+            return
+
+        if self._game_submode == "test" and self._learner is not None:
+            tdx, tdy = self._learner.get_cursor_delta(gs, 1.0, 1.0, dt)
+            axis_thresh = 0.10
+            tilt_x = -1 if tdx < -axis_thresh else (1 if tdx > axis_thresh else 0)
+            tilt_y = -1 if tdy < -axis_thresh else (1 if tdy > axis_thresh else 0)
+            if self._mode == "accessible":
+                self._read_gesture_accessible(tilt_x, tilt_y)
+            else:
+                self._read_gesture_standard(tilt_x, tilt_y)
             return
 
         tilt_x = 0
@@ -326,12 +393,21 @@ class SnakeGame:
             return "home"
         elif key == pygame.K_f:
             self._toggle_fullscreen()
-        elif key in (pygame.K_l, pygame.K_t):
-            self._mode_toast_msg = "Learn / Test mode: open Fruit Slice"
-            self._mode_toast = 2.5
+        elif key == pygame.K_l:
+            self._switch_submode("learn")
+        elif key == pygame.K_t:
+            self._switch_submode("test")
         elif key == pygame.K_r and not self._game_over:
-            self._mode_toast_msg = "Already in Regular mode"
-            self._mode_toast = 1.5
+            self._switch_submode("play")
+        elif key == pygame.K_v and self._game_submode == "test":
+            if self._learner is not None:
+                if not self._show_validation:
+                    self._learner.start_validation()
+                self._show_validation = not self._show_validation
+        elif key == pygame.K_g and self._game_submode == "learn":
+            enabled = self._guided.toggle()
+            self._mode_toast_msg = "GUIDED LEARN" if enabled else "MANUAL LEARN"
+            self._mode_toast = 1.8
         return None
 
     # ── Update ────────────────────────────────────────────────────────────────
@@ -339,7 +415,27 @@ class SnakeGame:
     def _update(self, dt: float) -> None:
         if self._mode_toast > 0:
             self._mode_toast = max(0.0, self._mode_toast - dt)
-        self._read_gesture()
+        gs = self._gesture_src.get_state() if self._gesture_src else None
+        if gs is not None and self._learner is not None:
+            self._learner.update(gs)
+            if self._game_submode == "learn":
+                hx, hy = self._body[0]
+                fx, fy = self._food
+                blade_xy = (
+                    float(self._ox + hx * self._cell + self._cell // 2),
+                    float(self._oy + hy * self._cell + self._cell // 2),
+                )
+                cur_dir = self._guided.current_direction
+                if cur_dir is not None:
+                    foods_xy = [synthetic_target_xy(blade_xy, cur_dir, span=float(self._cell * 6))]
+                else:
+                    foods_xy = [(
+                        float(self._ox + fx * self._cell + self._cell // 2),
+                        float(self._oy + fy * self._cell + self._cell // 2),
+                    )]
+                self._learner.try_record(gs, blade_xy, foods_xy, mode=self._mode)
+                self._guided.observe_class_counts(self._learner.class_counts)
+        self._read_gesture(gs, dt)
 
         self._move_timer += dt
         if self._move_timer >= self._move_interval:
@@ -400,6 +496,8 @@ class SnakeGame:
             )
         if self._mode_toast > 0:
             self._draw_mode_toast()
+        if self._show_validation and self._game_submode == "test":
+            self._draw_validation_panel()
 
     def _draw_mode_toast(self) -> None:
         sc    = self._fsc
@@ -558,6 +656,25 @@ class SnakeGame:
                 bottom=self._H - max(4, int(8 * sc)),
             ))
 
+        guided_text = (
+            self._guided.status_text()
+            if self._game_submode == "learn" and not self._sklearn_missing
+            else ""
+        )
+        draw_submode_indicator(
+            self._screen,
+            self._font_sm,
+            self._font_md,
+            self._W,
+            self._H,
+            self._game_submode,
+            self._sklearn_missing,
+            self._learner,
+            guided_text=guided_text,
+            show_balance_warn=True,
+            show_rec_flash=False,
+        )
+
     def _draw_debug(self) -> None:
         if self._gesture_src is None:
             return
@@ -586,3 +703,10 @@ class SnakeGame:
         if subtitle:
             s = self._font_md.render(subtitle, True, DIM_CLR)
             self._screen.blit(s, s.get_rect(center=(self._W // 2, self._H // 2 + max(10, int(20 * sc)))))
+
+    def _draw_validation_panel(self) -> None:
+        lines = build_validation_lines(self._learner, self._sklearn_missing, detail_level="compact")
+        draw_validation_panel(
+            self._screen, self._W, self._H, lines,
+            panel_mode=self._mode, detail_level="compact",
+        )

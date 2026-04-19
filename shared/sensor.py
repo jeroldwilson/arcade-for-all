@@ -201,7 +201,11 @@ class MetaMotionSensor:
     def stop_background(self) -> None:
         """Signal the BLE thread to stop cleanly."""
         if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._teardown(), self._loop)
+            fut = asyncio.run_coroutine_threadsafe(self._teardown(), self._loop)
+            try:
+                fut.result(timeout=5)  # wait so the loop doesn't close mid-teardown
+            except Exception:
+                pass
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -409,7 +413,10 @@ class MetaMotionSensor:
 
     async def disconnect(self) -> None:
         if self._client and self._connected:
-            await self._client.stop_notify(METAWEAR_NOTIFY_CHAR_UUID)
+            try:
+                await self._client.stop_notify(METAWEAR_NOTIFY_CHAR_UUID)
+            except Exception:
+                pass  # already unsubscribed (e.g. double-teardown race or BLE drop)
             await self._client.disconnect()
             self._connected = False
             logger.info("Disconnected.")

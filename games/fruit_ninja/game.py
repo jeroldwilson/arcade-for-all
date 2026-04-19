@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.learn_test_support import (
+    build_validation_lines,
+    draw_submode_indicator,
+    draw_validation_panel,
+)
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -1101,62 +1106,19 @@ class FruitNinjaGame:
                 right=self._W - max(4, int(10 * sc)),
                 top=combo_y))
 
-        # Learn / test submode indicators
-        if self._game_submode == "learn" and self._sklearn_missing:
-            lbl = self._font_sm.render(
-                "LEARN UNAVAILABLE — pip install scikit-learn", True, (255, 80, 60))
-            self._screen.blit(lbl, lbl.get_rect(
-                right=self._W - max(4, int(10 * sc)),
-                bottom=self._H - max(4, int(8 * sc))))
-
-        elif self._game_submode == "learn" and self._learner is not None:
-            n    = self._learner.total_recordings
-            bal  = "" if self._learner.class_balance_ok else "  ⚠ imbalanced"
-            lbl  = self._font_sm.render(
-                f"LEARN  {n} rec{bal}  [R=regular T=test]", True, (255, 130, 60))
-            self._screen.blit(lbl, lbl.get_rect(
-                right=self._W - max(4, int(10 * sc)),
-                bottom=self._H - max(4, int(8 * sc))))
-            if self._learner.rec_flash_active:
-                rec_s = self._font_md.render("● REC", True, (255, 60, 60))
-                self._screen.blit(rec_s, rec_s.get_rect(
-                    center=(self._W // 2, max(24, int(40 * sc)))))
-
-        elif self._game_submode == "test" and self._sklearn_missing:
-            lbl = self._font_sm.render(
-                "TEST UNAVAILABLE — pip install scikit-learn", True, (255, 80, 60))
-            self._screen.blit(lbl, lbl.get_rect(
-                right=self._W - max(4, int(10 * sc)),
-                bottom=self._H - max(4, int(8 * sc))))
-
-        elif self._game_submode == "test" and self._learner is not None:
-            if self._learner.model_ready:
-                lbl = self._font_sm.render(
-                    "TEST  MODEL READY  [V=validate  R=regular  L=learn]",
-                    True, (100, 220, 255))
-                self._screen.blit(lbl, lbl.get_rect(
-                    right=self._W - max(4, int(10 * sc)),
-                    bottom=self._H - max(4, int(8 * sc))))
-            else:
-                n = self._learner.saved_sample_count
-                need = 10
-                if n == 0:
-                    reason = "no data yet — press L to learn first"
-                elif n < need:
-                    reason = f"only {n}/{need} samples — press L and play more"
-                else:
-                    reason = f"{n} samples saved — retraining…"
-                lbl = self._font_sm.render(
-                    f"TEST  NO MODEL  ({reason})", True, (255, 140, 100))
-                self._screen.blit(lbl, lbl.get_rect(
-                    right=self._W - max(4, int(10 * sc)),
-                    bottom=self._H - max(4, int(8 * sc))))
-
-        elif self._game_submode == "play":
-            hint = self._font_sm.render("L=learn  T=test", True, (100, 100, 130))
-            self._screen.blit(hint, hint.get_rect(
-                right=self._W - max(4, int(10 * sc)),
-                bottom=self._H - max(4, int(8 * sc))))
+        # Learn / test submode indicators (shared renderer).
+        draw_submode_indicator(
+            self._screen,
+            self._font_sm,
+            self._font_md,
+            self._W,
+            self._H,
+            self._game_submode,
+            self._sklearn_missing,
+            self._learner,
+            show_balance_warn=True,
+            show_rec_flash=True,
+        )
 
         # Submode switch toast
         if self._submode_toast > 0:
@@ -1251,124 +1213,19 @@ class FruitNinjaGame:
         self._screen.blit(ctrl, ctrl.get_rect(center=(cx, cy + int(82 * sc))))
 
     def _draw_validation_panel(self) -> None:
-        """
-        Fixed-size validation panel pinned to the bottom-right corner.
-        Size is constant regardless of window/fullscreen resolution.
-        """
-        from shared.gesture_learner import DIRECTIONS
-
-        # ── Fixed pixel dimensions — never scale with sc ──────────────────────
-        PW   = 300   # panel width  (px)
-        PAD  = 10    # inner padding
-        MARGIN = 10  # gap from screen edge
-        FONT = self._font_sm   # always use the small font
-
-        # ── Fonts baked at fixed sizes (independent of sc) ────────────────────
-        f_title = pygame.font.SysFont("monospace", 11, bold=True)
-        f_body  = pygame.font.SysFont("monospace", 10)
-
-        # ── Build content lines first so we know panel height ─────────────────
-        lines = []   # list of (text, color, indent)
-
-        def add(text, color=(180, 180, 200), indent=0):
-            lines.append((text, color, indent))
-
-        add("MODEL VALIDATION  [V close]", (100, 180, 255))
-        add("")
-
-        if self._sklearn_missing:
-            add("sklearn not installed", (220, 90, 70))
-            add("pip install scikit-learn", (180, 100, 80))
-        elif self._learner is None:
-            add("No learner.", (200, 100, 100))
-        elif self._learner.validation_running:
-            dots = "." * (1 + (pygame.time.get_ticks() // 400) % 3)
-            add(f"Validating{dots}", (220, 210, 80))
-            add("session-aware CV running…", (110, 110, 140))
-        else:
-            res = self._learner.validation_result
-            if res is None:
-                add("Press V to validate.", (140, 140, 170))
-            elif res.error:
-                add(f"! {res.error}", (220, 90, 70))
-            else:
-                acc_pct = int(res.overall_accuracy * 100)
-                acc_clr = (80, 215, 100) if acc_pct >= 75 else \
-                          (230, 195, 55) if acc_pct >= 55 else (215, 75, 75)
-                add(f"Accuracy: {acc_pct}%", acc_clr)
-                add(f"{res.n_samples} samples  {res.n_sessions} sessions  "
-                    f"{res.cv_folds_used} folds", (110, 110, 140))
-                add("")
-
-                dir_labels = {"right": "→R", "left": "←L", "up": "↑U", "down": "↓D"}
-                dirs_in_data = [d for d in DIRECTIONS if d in res.per_class]
-
-                add("Dir  F1   P   R    n", (110, 110, 150))
-                add("─" * 28, (50, 50, 75))
-                for d in dirs_in_data:
-                    info    = res.per_class[d]
-                    f1_pct  = int(info.get("f1", 0) * 100)
-                    p_pct   = int(info.get("precision", 0) * 100)
-                    r_pct   = int(info.get("recall", 0) * 100)
-                    support = info["support"]
-                    is_weak = (d == res.weakest_class)
-                    clr     = (255, 215, 70) if is_weak else (185, 185, 210)
-                    add(f"{dir_labels[d]:<4} {f1_pct:>3}% {p_pct:>3}% {r_pct:>3}%  {support:>3}", clr)
-
-                add("")
-                short  = {"right": "R", "left": "L", "up": "U", "down": "D"}
-                dirs_m = [d for d in DIRECTIONS if d in res.confusion]
-                if dirs_m:
-                    add("Confusion (true→pred):", (110, 110, 150))
-                    hdr = "     " + "  ".join(f"{short[d]:<2}" for d in dirs_m)
-                    add(hdr, (100, 130, 170))
-                    for true_d in dirs_m:
-                        row = f"{short[true_d]:<3}  "
-                        row += "  ".join(f"{res.confusion[true_d].get(p,0):<2}" for p in dirs_m)
-                        diag_ok = res.confusion[true_d].get(true_d, 0)
-                        row_clr = (80, 200, 100) \
-                            if diag_ok >= res.per_class[true_d]["support"] * 0.7 \
-                            else (185, 185, 210)
-                        add(row, row_clr)
-
-                add("")
-                fp_pct  = int(res.fp_rate * 100)
-                ab_pct  = int(res.abstain_rate * 100)
-                lat_str = f"{res.latency_ms:.2f}ms" if res.latency_ms > 0 else "n/a"
-                add(f"FP rate: {fp_pct}%   Abstain: {ab_pct}%", (140, 140, 170))
-                add(f"Latency: ~{lat_str}", (140, 140, 170))
-
-                if res.weakest_class and not res.error:
-                    weak_f1 = int(res.per_class[res.weakest_class].get("f1", 0) * 100)
-                    if weak_f1 < 80:
-                        arrow = {"right": "→", "left": "←", "up": "↑", "down": "↓"}
-                        add("")
-                        add(f"Tip: more {arrow.get(res.weakest_class,'')} "
-                            f"{res.weakest_class} (F1={weak_f1}%)",
-                            (255, 210, 70))
-
-        # ── Measure height ────────────────────────────────────────────────────
-        LINE_H = 13
-        PH = PAD * 2 + len(lines) * LINE_H
-
-        # ── Position: bottom-right corner, fixed margin ───────────────────────
-        px = self._W - PW - MARGIN
-        py = self._H - PH - MARGIN
-
-        # ── Draw panel background (semi-transparent) ──────────────────────────
-        panel = pygame.Surface((PW, PH), pygame.SRCALPHA)
-        panel.fill((6, 6, 18, 155))        # more transparent: alpha 155
-        self._screen.blit(panel, (px, py))
-        pygame.draw.rect(self._screen, (60, 100, 170, 180),
-                         (px, py, PW, PH), 1, border_radius=6)
-
-        # ── Render text lines ─────────────────────────────────────────────────
-        iy = py + PAD
-        for text, color, *_ in lines:
-            if text:
-                surf = f_body.render(text, True, color)
-                self._screen.blit(surf, (px + PAD, iy))
-            iy += LINE_H
+        lines = build_validation_lines(
+            self._learner,
+            self._sklearn_missing,
+            detail_level="detailed",
+        )
+        draw_validation_panel(
+            self._screen,
+            self._W,
+            self._H,
+            lines,
+            panel_mode=self._mode,
+            detail_level="detailed",
+        )
 
     def _draw_star(self, cx, cy, size, color, filled) -> None:
         pts = []

@@ -8,6 +8,8 @@ Controls
   Keyboard mode: ← / → arrow keys move the paddle.
                  SPACE launches the ball.
   Both modes   : ESC = pause / back to menu (when game over), R = restart.
+                 L = learn mode, T = test mode, V = validation panel (test).
+                 G = guided/manual learn toggle (in learn mode).
 
 Design decisions
 ────────────────
@@ -27,6 +29,13 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.learn_test_support import (
+    GuidedLearnFlow,
+    build_validation_lines,
+    draw_submode_indicator,
+    draw_validation_panel,
+    synthetic_target_xy,
+)
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -170,6 +179,7 @@ class BricksGame:
         mode: str = "standard",
         audio=None,
         username: str = "",
+        game_submode: str = "play",   # "play" | "learn" | "test"
     ):
         self._clock          = clock
         self._mode           = mode
@@ -177,10 +187,55 @@ class BricksGame:
         self._gesture_source = None
         self._debug_hud      = debug
         self._username       = username
+        self._game_submode   = game_submode
+        self._show_validation: bool = False
+        self._sklearn_missing: bool = False
+        self._learner = None
+        self._guided = GuidedLearnFlow(("right", "left"), per_direction_target=8)
         self._mode_toast: float = 0.0
         self._mode_toast_msg: str = ""
+        if game_submode in ("learn", "test"):
+            self._init_learner()
+        if game_submode == "test" and self._learner is not None:
+            self._learner.start_validation()
+            self._show_validation = True
         self._init_layout(screen)
         self._reset()
+
+    def _init_learner(self) -> None:
+        if self._learner is not None:
+            return
+        try:
+            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            if not SKLEARN_AVAILABLE:
+                self._sklearn_missing = True
+                print("[bricks] scikit-learn not installed — learn/test mode unavailable.")
+                return
+            self._learner = GestureLearningSystem(username=self._username)
+            self._sklearn_missing = False
+        except ImportError as exc:
+            self._sklearn_missing = True
+            print(f"[bricks] Import error: {exc}")
+
+    def _switch_submode(self, new_mode: str) -> None:
+        if new_mode == self._game_submode:
+            return
+        if self._learner is not None and self._game_submode in ("learn", "test"):
+            self._learner.save_and_train()
+        self._game_submode = new_mode
+        self._show_validation = False
+        if new_mode in ("learn", "test"):
+            self._init_learner()
+        if new_mode == "test" and self._learner is not None:
+            self._learner.start_validation()
+            self._show_validation = True
+        if new_mode == "learn":
+            self._guided.reset(enable=True)
+            if self._learner is not None:
+                self._guided.sync_baseline(self._learner.class_counts)
+        labels = {"play": "REGULAR MODE", "learn": "LEARN MODE", "test": "TEST MODE"}
+        self._mode_toast_msg = labels.get(new_mode, new_mode.upper())
+        self._mode_toast = 2.5
 
     def _init_layout(self, screen: pygame.Surface) -> None:
         """Compute all screen-size-dependent layout variables."""
@@ -232,6 +287,8 @@ class BricksGame:
             dt = self._clock.tick(FPS) / 1000.0
             result = self._handle_events()
             if result:
+                if self._learner is not None:
+                    self._learner.save_and_train()
                 if self._audio:
                     self._audio.stop_background()
                 return result
@@ -351,12 +408,21 @@ class BricksGame:
             self._launch_all_inactive()
         elif key == pygame.K_f:
             self._toggle_fullscreen()
-        elif key in (pygame.K_l, pygame.K_t):
-            self._mode_toast_msg = "Learn / Test mode: open Fruit Slice"
-            self._mode_toast = 2.5
+        elif key == pygame.K_l:
+            self._switch_submode("learn")
+        elif key == pygame.K_t:
+            self._switch_submode("test")
         elif key == pygame.K_r and not (self._game_over or self._you_win):
-            self._mode_toast_msg = "Already in Regular mode"
-            self._mode_toast = 1.5
+            self._switch_submode("play")
+        elif key == pygame.K_v and self._game_submode == "test":
+            if self._learner is not None:
+                if not self._show_validation:
+                    self._learner.start_validation()
+                self._show_validation = not self._show_validation
+        elif key == pygame.K_g and self._game_submode == "learn":
+            enabled = self._guided.toggle()
+            self._mode_toast_msg = "GUIDED LEARN" if enabled else "MANUAL LEARN"
+            self._mode_toast = 1.8
         # Keyboard fallback: SPACE is also wired through trigger_launch
         src = self._gesture_source
         if key == pygame.K_SPACE and hasattr(src, "trigger_launch"):
@@ -369,11 +435,26 @@ class BricksGame:
         if self._mode_toast > 0:
             self._mode_toast = max(0.0, self._mode_toast - dt)
         gs = self._gesture_source.get_state() if self._gesture_source else None
+        if gs is not None and self._learner is not None:
+            self._learner.update(gs)
 
         self._update_paddle(dt, gs)
         self._update_balls(dt, gs)
         self._update_powerups(dt)
         self._check_win()
+        if gs is not None and self._learner is not None and self._game_submode == "learn":
+            blade_xy = (float(self._paddle.centerx), float(self._paddle.centery))
+            fruits_xy: List[Tuple[float, float]] = []
+            cur_dir = self._guided.current_direction
+            if cur_dir is not None:
+                fruits_xy = [synthetic_target_xy(blade_xy, cur_dir, span=float(self._W) * 0.16)]
+            else:
+                target_ball = self._pick_target_ball()
+                if target_ball is not None:
+                    fruits_xy = [(float(target_ball.x), float(self._paddle.centery))]
+            if fruits_xy:
+                self._learner.try_record(gs, blade_xy, fruits_xy, mode=self._mode)
+                self._guided.observe_class_counts(self._learner.class_counts)
         if self._bounce_msg_timer > 0:
             self._bounce_msg_timer = max(0.0, self._bounce_msg_timer - dt)
 
@@ -393,10 +474,14 @@ class BricksGame:
         if mx != self._prev_mouse_x:
             self._paddle.centerx = mx
             self._prev_mouse_x = mx
-        elif self._mode == "accessible":
+        elif self._mode == "accessible" and self._game_submode != "test":
             self._update_paddle_intent(dt, gs)
         else:
             velocity = gs.paddle_velocity if gs else 0.0
+            if self._game_submode == "test" and self._learner is not None and gs is not None:
+                tdx, _tdy = self._learner.get_cursor_delta(gs, self._W * 0.25, self._H * 0.25, dt)
+                denom = max(self._paddle_spd * dt, 1e-6)
+                velocity = max(-1.0, min(1.0, tdx / denom))
             # Non-linear curve: |v|^0.65 expands mid-range so a moderate
             # tilt (~0.4g) gives ~60% speed rather than 40% — feels more
             # immediate without changing the gesture interpreter.
@@ -636,6 +721,8 @@ class BricksGame:
             self._draw_overlay("YOU WIN!", f"Final score: {self._score}   R=restart   ESC=menu")
         if self._mode_toast > 0:
             self._draw_mode_toast()
+        if self._show_validation and self._game_submode == "test":
+            self._draw_validation_panel()
 
     def _draw_bricks(self) -> None:
         for brick in self._bricks:
@@ -686,6 +773,25 @@ class BricksGame:
             pygame.draw.rect(self._screen, POWERUP_CLRS["WIDE"], bar_r)
         if self._mode == "accessible":
             self._draw_hud_mode_badge()
+
+        guided_text = (
+            self._guided.status_text()
+            if self._game_submode == "learn" and not self._sklearn_missing
+            else ""
+        )
+        draw_submode_indicator(
+            self._screen,
+            self._font_sm,
+            self._font_md,
+            self._W,
+            self._H,
+            self._game_submode,
+            self._sklearn_missing,
+            self._learner,
+            guided_text=guided_text,
+            show_balance_warn=True,
+            show_rec_flash=False,
+        )
 
     def _draw_debug(self) -> None:
         gs = self._gesture_source.get_state() if self._gesture_source else None
@@ -747,3 +853,10 @@ class BricksGame:
             self._screen.blit(s, s.get_rect(
                 center=(self._W // 2, self._H // 2 + max(10, int(20 * sc)))
             ))
+
+    def _draw_validation_panel(self) -> None:
+        lines = build_validation_lines(self._learner, self._sklearn_missing, detail_level="compact")
+        draw_validation_panel(
+            self._screen, self._W, self._H, lines,
+            panel_mode=self._mode, detail_level="compact",
+        )
