@@ -16,6 +16,7 @@ import sys
 from typing import List, Optional, Tuple
 
 import pygame
+from shared.learn_test_support import draw_gesture_debug_overlay
 
 
 # ── Dimensions ────────────────────────────────────────────────────────────────
@@ -89,10 +90,12 @@ class HomeScreen:
         clock: pygame.time.Clock,
         mode: str = "standard",
         username: str = "",
+        debug: bool = False,
     ):
         self._clock    = clock
         self.mode      = mode
         self._username = username
+        self._debug    = debug
 
         self._games: list = self._compute_games()
         self._selected_idx: int = 0
@@ -204,6 +207,10 @@ class HomeScreen:
                 return result
 
             self._draw()
+            if self._debug and gesture_src is not None:
+                gs = gesture_src.get_state()
+                draw_gesture_debug_overlay(
+                    self._screen, gs, self._W, self._H, self._sc, self._font_card)
             pygame.display.flip()
 
     # ── Input handling ────────────────────────────────────────────────────────
@@ -218,6 +225,8 @@ class HomeScreen:
                 return self._games[self._selected_idx]
             elif event.key == pygame.K_m:
                 self._cycle_mode()
+            elif event.key == pygame.K_d:
+                self._debug = not self._debug
             elif event.key == pygame.K_f:
                 self._toggle_fullscreen()
             elif event.key == pygame.K_ESCAPE:

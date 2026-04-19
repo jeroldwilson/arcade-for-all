@@ -320,3 +320,105 @@ def draw_validation_panel(
             surf = f_body.render(text, True, color)
             screen.blit(surf, (px + pad, iy))
         iy += line_h
+
+
+def _draw_dir_arrow(
+    screen: pygame.Surface,
+    cx: int, cy: int,
+    direction: str,
+    size: int,
+    color: Tuple[int, int, int],
+) -> None:
+    """Draw a filled polygon arrow triangle for a cardinal direction."""
+    hw = max(1, size * 7 // 10)   # half-width at the base
+    hh = max(1, size // 2)        # inset of base from tip
+    if direction == "left":
+        pts = [(cx - size, cy), (cx + hh, cy - hw), (cx + hh, cy + hw)]
+    elif direction == "right":
+        pts = [(cx + size, cy), (cx - hh, cy - hw), (cx - hh, cy + hw)]
+    elif direction == "up":
+        pts = [(cx, cy - size), (cx - hw, cy + hh), (cx + hw, cy + hh)]
+    elif direction == "down":
+        pts = [(cx, cy + size), (cx - hw, cy - hh), (cx + hw, cy - hh)]
+    else:
+        return
+    pygame.draw.polygon(screen, color, pts)
+
+
+def draw_gesture_debug_overlay(
+    screen: pygame.Surface,
+    gs,
+    W: int,
+    H: int,
+    sc: float,
+    font: pygame.font.Font,
+) -> None:
+    """In debug mode: show the currently detected gesture prominently at the top-centre."""
+    if gs is None:
+        return
+
+    # Priority-ordered gesture detection → (arrow_direction, label, color)
+    if gs.launch:
+        arrow, label, color = "up",   "LAUNCH",  (255, 255, 80)
+    elif getattr(gs, "slice_active", False) and getattr(gs, "slice_direction", ""):
+        sd = gs.slice_direction
+        if "right" in sd:    a = "right"
+        elif "left" in sd:   a = "left"
+        elif "up" in sd:     a = "up"
+        elif "down" in sd:   a = "down"
+        else:                a = "none"
+        arrow, label, color = a, f"SLICE {sd.upper()}", (255, 130, 50)
+    elif gs.paddle_velocity < -0.12:
+        arrow, label, color = "left",  "LEFT",   (100, 200, 255)
+    elif gs.paddle_velocity > 0.12:
+        arrow, label, color = "right", "RIGHT",  (100, 200, 255)
+    elif gs.tilt_y < -0.12:
+        arrow, label, color = "up",   "UP",     (100, 255, 140)
+    elif gs.tilt_y > 0.12:
+        arrow, label, color = "down", "DOWN",   (100, 255, 140)
+    elif gs.spin > 0.20:
+        arrow, label, color = "spin", "SPIN R", (255, 170, 80)
+    elif gs.spin < -0.20:
+        arrow, label, color = "spin", "SPIN L", (255, 170, 80)
+    else:
+        arrow, label, color = "none", "IDLE",   (70, 70, 95)
+
+    bar_h = max(44, int(58 * sc))
+    bar = pygame.Surface((W, bar_h), pygame.SRCALPHA)
+    bar.fill((0, 0, 0, 210))
+    screen.blit(bar, (0, 0))
+
+    cy = bar_h // 2
+    arrow_size = max(14, int(20 * sc))
+    gap = max(6, int(10 * sc))
+
+    text_surf = font.render(label, True, color)
+    tw = text_surf.get_width()
+
+    if arrow in ("left", "right", "up", "down"):
+        # Group: [arrow polygon] [gap] [label], centred together
+        group_w = arrow_size * 2 + gap + tw
+        gx = (W - group_w) // 2
+        _draw_dir_arrow(screen, gx + arrow_size, cy, arrow, arrow_size, color)
+        screen.blit(text_surf, text_surf.get_rect(
+            left=gx + arrow_size * 2 + gap, centery=cy))
+    elif arrow == "spin":
+        # Spin: two small opposing arrows flanking the label
+        sa = arrow_size * 3 // 4
+        group_w = sa * 2 + gap + tw + gap + sa * 2
+        gx = (W - group_w) // 2
+        spin_r = "R" in label
+        _draw_dir_arrow(screen, gx + sa, cy, "right" if spin_r else "left",
+                        sa, color)
+        _draw_dir_arrow(screen, gx + sa * 2, cy, "left" if spin_r else "right",
+                        sa, color)
+        screen.blit(text_surf, text_surf.get_rect(
+            left=gx + sa * 2 + gap, centery=cy))
+        tx_end = gx + sa * 2 + gap + tw + gap
+        _draw_dir_arrow(screen, tx_end + sa, cy, "right" if spin_r else "left",
+                        sa, color)
+        _draw_dir_arrow(screen, tx_end + sa * 2, cy, "left" if spin_r else "right",
+                        sa, color)
+    else:
+        # IDLE: just centred dim text
+        screen.blit(text_surf, text_surf.get_rect(center=(W // 2, cy)))

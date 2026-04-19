@@ -19,6 +19,7 @@ import time
 from typing import List, Tuple
 
 import pygame
+from shared.learn_test_support import draw_gesture_debug_overlay
 
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -126,6 +127,8 @@ class CalibrationGame:
                         self._yaw_deg = 0.0
                     elif event.key == pygame.K_f:
                         self._toggle_fullscreen()
+                    elif event.key == pygame.K_d:
+                        self._debug = not self._debug
                     elif event.key in (pygame.K_l, pygame.K_t):
                         self._mode_toast_msg = "Learn / Test mode: open Fruit Slice"
                         self._mode_toast = 2.5
@@ -168,6 +171,9 @@ class CalibrationGame:
 
             self._draw(ax, ay, az, gx, gy, gz,
                        pitch_display, roll_display, self._yaw_deg, gs.calibrated, gs)
+            if self._debug:
+                draw_gesture_debug_overlay(
+                    self._screen, gs, self._W, self._H, self._sc, self._font_big)
             if self._mode_toast > 0:
                 sc    = self._sc
                 alpha = min(255, int(self._mode_toast / 2.5 * 255))

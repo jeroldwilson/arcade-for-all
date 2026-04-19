@@ -258,7 +258,8 @@ def main() -> None:
     from games.snake.game       import SnakeGame
     from games.fruit_ninja.game import FruitNinjaGame
 
-    home = HomeScreen(screen, clock, mode=mode, username=username)
+    debug = args.debug   # tracks D-key toggles across home ↔ game transitions
+    home = HomeScreen(screen, clock, mode=mode, username=username, debug=debug)
 
     try:
         while True:
@@ -269,31 +270,38 @@ def main() -> None:
                 home._init_layout(cur)
 
             selected = home.run(gesture_src)
-            mode = home.mode   # may have been toggled on the home screen
+            mode  = home.mode    # may have been toggled on the home screen
+            debug = home._debug  # preserve D-key toggle from home screen
 
             # Use the live display surface when creating each game.
             cur = pygame.display.get_surface()
 
             if selected == "bricks":
-                game = BricksGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                game = BricksGame(cur, clock, debug=debug, mode=mode, audio=audio,
                                   username=username)
                 game.run(gesture_src)   # returns "home"
+                debug = game._debug
 
             elif selected == "snake":
-                game = SnakeGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                game = SnakeGame(cur, clock, debug=debug, mode=mode, audio=audio,
                                  username=username)
                 game.run(gesture_src)   # returns "home"
+                debug = game._debug
 
             elif selected == "fruit_ninja":
-                game = FruitNinjaGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                game = FruitNinjaGame(cur, clock, debug=debug, mode=mode, audio=audio,
                                       username=username)
                 game.run(gesture_src)   # returns "home"
+                debug = game._debug
 
             elif selected == "calibration":
                 from games.calibration.game import CalibrationGame
-                game = CalibrationGame(cur, clock, debug=args.debug, mode=mode, audio=audio,
+                game = CalibrationGame(cur, clock, debug=debug, mode=mode, audio=audio,
                                        username=username)
                 game.run(gesture_src)   # returns "home"
+                debug = game._debug
+
+            home._debug = debug  # sync debug state back into home screen
 
     except KeyboardInterrupt:
         print("\n[main] Interrupted.")

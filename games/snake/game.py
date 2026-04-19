@@ -30,6 +30,7 @@ import pygame
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
+    draw_gesture_debug_overlay,
     draw_submode_indicator,
     draw_validation_panel,
     synthetic_target_xy,
@@ -46,8 +47,12 @@ COLS           = W // CELL   # 40
 ROWS           = H // CELL   # 30
 MOVE_INTERVAL  = 0.12        # seconds per grid step (base)
 MIN_INTERVAL   = 0.05        # fastest possible
-SPEED_FACTOR   = 0.005       # shaved off interval per food eaten
 TILT_THRESH    = 0.35        # gesture threshold to register a direction change
+
+# Veera mode speed progression (score-based, not per-food)
+VEERA_GOAL_SCORE         = 200   # reach full speed at this score (20 foods × 10 pts)
+VEERA_MOVE_INTERVAL_SLOW = 0.28  # very slow start (~3.6 steps/s)
+VEERA_MOVE_INTERVAL_FULL = 0.07  # full speed (~14.3 steps/s)
 
 # Accessible mode
 MOVE_INTERVAL_ACCESSIBLE = 0.50   # slower, fixed speed (no acceleration) — half of standard
@@ -226,7 +231,7 @@ class SnakeGame:
         self._paused      = False
         self._move_timer  = 0.0
         self._move_interval = (
-            MOVE_INTERVAL_ACCESSIBLE if self._mode == "accessible" else MOVE_INTERVAL
+            MOVE_INTERVAL_ACCESSIBLE if self._mode == "accessible" else VEERA_MOVE_INTERVAL_SLOW
         )
         self._food        = self._spawn_food()
         self._fruit_type  = random.choice(FRUITS)
@@ -393,6 +398,8 @@ class SnakeGame:
             return "home"
         elif key == pygame.K_f:
             self._toggle_fullscreen()
+        elif key == pygame.K_d:
+            self._debug = not self._debug
         elif key == pygame.K_l:
             self._switch_submode("learn")
         elif key == pygame.K_t:
@@ -471,9 +478,12 @@ class SnakeGame:
             self._fruit_type = random.choice(FRUITS)
             if self._audio:
                 self._audio.play_collect()
-            # Accessible mode: no speed increase
+            # Veera: speed ramps up linearly with score (slow start → full at goal)
             if self._mode != "accessible":
-                self._move_interval = max(MIN_INTERVAL, self._move_interval - SPEED_FACTOR)
+                progress = min(1.0, self._score / VEERA_GOAL_SCORE)
+                slow_spd = 1.0 / VEERA_MOVE_INTERVAL_SLOW
+                full_spd = 1.0 / VEERA_MOVE_INTERVAL_FULL
+                self._move_interval = 1.0 / (slow_spd + progress * (full_spd - slow_spd))
         else:
             self._body.pop()
 
@@ -679,6 +689,7 @@ class SnakeGame:
         if self._gesture_src is None:
             return
         gs = self._gesture_src.get_state()
+        draw_gesture_debug_overlay(self._screen, gs, self._W, self._H, self._fsc, self._font_lg)
         lines = [
             f"paddle_vel : {gs.paddle_velocity:+.3f}",
             f"tilt_y     : {gs.tilt_y:+.3f}",

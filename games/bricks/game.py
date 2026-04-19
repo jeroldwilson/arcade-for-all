@@ -32,6 +32,7 @@ import pygame
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
+    draw_gesture_debug_overlay,
     draw_submode_indicator,
     draw_validation_panel,
     synthetic_target_xy,
@@ -50,6 +51,11 @@ PADDLE_SPEED  = 560        # pixels/sec at full velocity
 
 BALL_R        = 9
 BALL_SPEED    = 340        # pixels/sec initial
+
+# Veera mode speed progression (score-based, applied at each ball launch)
+VEERA_GOAL_SCORE       = 500   # reach full speed at this score (~12 bricks)
+VEERA_BALL_SPEED_SLOW  = 160   # very slow start (px/s)
+VEERA_BALL_SPEED_FULL  = 360   # full speed (px/s)
 
 BRICK_COLS    = 12
 BRICK_ROWS    = 6
@@ -185,7 +191,7 @@ class BricksGame:
         self._mode           = mode
         self._audio          = audio
         self._gesture_source = None
-        self._debug_hud      = debug
+        self._debug          = debug
         self._username       = username
         self._game_submode   = game_submode
         self._show_validation: bool = False
@@ -403,7 +409,7 @@ class BricksGame:
         elif key == pygame.K_r and (self._game_over or self._you_win):
             self._reset()
         elif key == pygame.K_d:
-            self._debug_hud = not self._debug_hud
+            self._debug = not self._debug
         elif key == pygame.K_SPACE:
             self._launch_all_inactive()
         elif key == pygame.K_f:
@@ -554,9 +560,15 @@ class BricksGame:
             if not ball.active:
                 angle = random.uniform(-65, -115)   # upward, slightly randomised
                 rad   = math.radians(angle)
-                speed = self._ball_spd + (self._level - 1) * int(20 * self._scale)
                 if self._mode == "accessible":
+                    speed = self._ball_spd + (self._level - 1) * int(20 * self._scale)
                     speed = min(speed, BALL_SPEED_ACCESSIBLE * self._scale)
+                else:
+                    # Veera: ramp from slow to full speed based on score
+                    progress = min(1.0, self._score / VEERA_GOAL_SCORE)
+                    slow_spd = VEERA_BALL_SPEED_SLOW * self._scale
+                    full_spd = VEERA_BALL_SPEED_FULL * self._scale
+                    speed = slow_spd + progress * (full_spd - slow_spd)
                 ball.vx = speed * math.cos(rad)
                 ball.vy = speed * math.sin(rad)
                 ball.active = True
@@ -709,7 +721,7 @@ class BricksGame:
         self._draw_balls()
         self._draw_paddle()
         self._draw_hud()
-        if self._debug_hud:
+        if self._debug:
             self._draw_debug()
         if self._bounce_msg_timer > 0:
             self._draw_bounce_msg()
@@ -797,6 +809,7 @@ class BricksGame:
         gs = self._gesture_source.get_state() if self._gesture_source else None
         if gs is None:
             return
+        draw_gesture_debug_overlay(self._screen, gs, self._W, self._H, self._scale, self._font_lg)
         lines = [
             f"ax (smooth) : {gs.raw_ax:+.3f} g",
             f"gz (smooth) : {gs.raw_gz:+.3f} °/s",

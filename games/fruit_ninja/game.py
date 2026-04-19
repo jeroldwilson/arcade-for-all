@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 import pygame
 from shared.learn_test_support import (
     build_validation_lines,
+    draw_gesture_debug_overlay,
     draw_submode_indicator,
     draw_validation_panel,
 )
@@ -75,6 +76,15 @@ SPAWN_INTERVAL     = 1.0
 SPAWN_INTERVAL_ACC_START = 2.8   # Astra: wide gap between fruits at start
 SPAWN_INTERVAL_ACC_FULL  = 1.8   # Astra: interval at full speed
 BOMB_PROB          = 0.13
+
+# Veera mode speed progression (score-based)
+VEERA_GOAL_SCORE          = 40    # reach full speed at this many slices
+VY_VEERA_SLOW             = (-560, -440)  # gentle start (peak ~65–80% screen)
+VY_VEERA_FULL             = (-900, -740)  # full speed (peak reaches top/above)
+VX_VEERA_SLOW             = 80    # ± horizontal drift at start (px/s)
+VX_VEERA_FULL             = 190   # ± horizontal drift at full speed (px/s)
+SPAWN_INTERVAL_VEERA_SLOW = 2.0   # slow spawn at start
+SPAWN_INTERVAL_VEERA_FULL = 0.5   # fast spawn at full speed
 
 # ── Astra adaptive fruit speed ────────────────────────────────────────────────
 # Speed ramps from SLOW at score 0 up to FULL at ACC_SPEED_FULL_SCORE slices.
@@ -769,6 +779,10 @@ class FruitNinjaGame:
         """0.0 (start) → 1.0 (full speed) based on score. Astra only."""
         return min(1.0, self._score / ACC_SPEED_FULL_SCORE)
 
+    def _veera_progress(self) -> float:
+        """0.0 (start) → 1.0 (full speed) based on score. Veera only."""
+        return min(1.0, self._score / VEERA_GOAL_SCORE)
+
     def _update_spawn(self, dt: float) -> None:
         self._spawn_cd -= dt
         if self._spawn_cd > 0 or len(self._fruits) >= 8:
@@ -778,7 +792,8 @@ class FruitNinjaGame:
             t        = self._acc_progress()
             interval = SPAWN_INTERVAL_ACC_START + t * (SPAWN_INTERVAL_ACC_FULL - SPAWN_INTERVAL_ACC_START)
         else:
-            interval = max(0.5, SPAWN_INTERVAL - self._score * 0.01)
+            p        = self._veera_progress()
+            interval = SPAWN_INTERVAL_VEERA_SLOW + p * (SPAWN_INTERVAL_VEERA_FULL - SPAWN_INTERVAL_VEERA_SLOW)
         self._spawn_cd = random.uniform(interval * 0.75, interval * 1.25)
 
     def _spawn_fruit(self) -> None:
@@ -797,9 +812,13 @@ class FruitNinjaGame:
             vxr = ACC_VX_SLOW + t * (ACC_VX_FULL - ACC_VX_SLOW)
             vx  = random.uniform(-vxr, vxr) * sc
         else:
-            # Standard: -740 to -900 → peak 721–1067 px (all reach top or above)
-            vy  = random.uniform(-900, -740) * sc
-            vx  = random.uniform(-190, 190) * sc
+            # Veera: ramp from slow to full speed with score
+            p   = self._veera_progress()
+            lo  = VY_VEERA_SLOW[0] + p * (VY_VEERA_FULL[0] - VY_VEERA_SLOW[0])
+            hi  = VY_VEERA_SLOW[1] + p * (VY_VEERA_FULL[1] - VY_VEERA_SLOW[1])
+            vy  = random.uniform(lo, hi) * sc
+            vxr = VX_VEERA_SLOW + p * (VX_VEERA_FULL - VX_VEERA_SLOW)
+            vx  = random.uniform(-vxr, vxr) * sc
 
         if random.random() < BOMB_PROB and self._mode != "accessible":
             r = int(BOMB_R * sc)
@@ -1140,6 +1159,7 @@ class FruitNinjaGame:
     def _draw_debug(self) -> None:
         gs  = self._gesture_src.get_state() if self._gesture_src else None
         sc  = self._sc
+        draw_gesture_debug_overlay(self._screen, gs, self._W, self._H, sc, self._font_lg)
         lines = [
             f"blade ({self._blade_x:.0f}, {self._blade_y:.0f})",
             f"moving: {self._moving}",

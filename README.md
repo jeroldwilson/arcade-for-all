@@ -15,12 +15,13 @@ Tilt your wrist left and right to move a paddle. Flick your wrist up to launch a
 5. [Sensor Gesture Mapping](#sensor-gesture-mapping)
 6. [Game Modes](#game-modes)
 7. [Games](#games)
-8. [Quick Start](#quick-start)
-9. [Command-Line Reference](#command-line-reference)
-10. [User Guide](#user-guide)
-11. [Project Structure](#project-structure)
-12. [Troubleshooting](#troubleshooting)
-13. [External References](#external-references)
+8. [Gesture Personalisation](#gesture-personalisation)
+9. [Quick Start](#quick-start)
+10. [Command-Line Reference](#command-line-reference)
+11. [User Guide](#user-guide)
+12. [Project Structure](#project-structure)
+13. [Troubleshooting](#troubleshooting)
+14. [External References](#external-references)
 
 ---
 
@@ -215,9 +216,23 @@ Grid-based snake game. Eat food to grow. Don't crash.
 **Sensor controls:** Tilt left/right for lateral movement. Tilt forward/backward for up/down.
 
 **Features:**
-- Smooth grid movement at configurable speed
-- ASTRA mode: wall-wrap (snake passes through walls rather than crashing)
-- Growing tail length with score tracking
+- Grid movement that speeds up as you score
+- ASTRA mode: wall-wrap (snake passes through walls rather than crashing), fixed speed, intent-assist steers toward food on any gesture
+- Keyboard arrows also work in both modes
+- Full learn/test/guided/validation support — uses food-cell position as gesture label
+
+### Fruit Slice
+
+60-second arcade game. Fruits arc upward from below; sweep the cursor over them to slice. Bombs cost a life in VEERA mode.
+
+**Sensor controls:** Yaw (abs_gz) → horizontal cursor; pitch (abs_gy) → vertical cursor. Cursor appears as a glowing slash trail.
+
+**Keyboard mode:** Mouse cursor is the blade. Anything moving faster than 4 px registers as a slice.
+
+**Features:**
+- ASTRA mode: high sensitivity, very forgiving hit zones, auto-aim pull toward nearest fruit, no bombs, 3-star scoring at 10/20 slices
+- VEERA mode: 3 lives, bombs, normal speed, combo multiplier (×2 / ×3)
+- Full learn/test/validation support — uses real on-screen fruit positions as gesture labels (no guided mode; real fruits replace synthetic targets)
 
 ### Calibrate *(sensor only)*
 
@@ -254,6 +269,167 @@ Four-panel aviation-style instrument display showing live sensor orientation. Op
 | ESC / Backspace | Return to home screen |
 | SPACE / R | Reset yaw accumulator to 0° |
 | F | Toggle fullscreen |
+
+---
+
+## Gesture Personalisation
+
+Bricks, Snake, and Fruit Slice can each learn your specific movement style and use a personal ML model to drive the game — no configuration required. All data and models are stored per-user under `data/gestures/{username}/`. The system is powered by `shared/gesture_learner.py` and shared UI utilities in `shared/learn_test_support.py`.
+
+> **Requirement:** `scikit-learn` is listed in `requirements.txt`. If it is missing, learn/test mode shows an "UNAVAILABLE" warning in the HUD.
+
+---
+
+### Submodes
+
+Three submodes can be toggled at any time **while any game is running**:
+
+| Key | Submode | What it does |
+|-----|---------|-------------|
+| **L** | Learn | Records labelled gesture samples as you play |
+| **T** | Test | Your personal ML model drives the paddle / snake / cursor instead of raw gyro |
+| **R** | Regular | Normal raw-gyro control; saves and retrains the model before returning |
+| **G** | Guided toggle | Switches between guided and manual learn (learn mode only; Bricks & Snake) |
+| **V** | Validation panel | Opens/closes the CV results panel (test mode only) |
+
+A brief toast message fades in for 2.5 s whenever you switch submodes.
+
+---
+
+### Per-game differences
+
+| Feature | Bricks | Snake | Fruit Slice |
+|---------|--------|-------|-------------|
+| Gesture directions learned | right, left | right, left, up, down | right, left, up, down |
+| Learn target (label source) | Active ball x-position at paddle height | Food cell position | Real on-screen fruits |
+| Guided mode | Yes (**G** key) | Yes (**G** key) | No — real fruits replace synthetic targets |
+| Test mode effect | Drives paddle left/right | Changes snake direction | Drives cursor position |
+| `● REC` flash on capture | No | No | Yes (centre-top) |
+| Validation panel detail | Compact (accuracy + F1 table) | Compact | Detailed (+ confusion matrix, latency, tip) |
+
+---
+
+### Learn mode
+
+Press **L** to start a learning session. Keep playing normally — data is captured automatically.
+
+**How a sample is captured (same for all games):**
+1. A rolling buffer holds the last ~30 frames of raw IMU data (~500 ms look-back).
+2. Every frame, five quality guards run before anything is saved:
+   - **Goal guard** — a target (fruit, ball, or food) must be present on screen.
+   - **Cooldown guard** — at least 0.6 s must have passed since the last recording.
+   - **Motion guard** — gyro magnitude must exceed 25 °/s (intentional motion only).
+   - **Erratic guard** — rejects random jitter (gyro-magnitude std below 180 °/s).
+   - **Ambiguity guard** — one spatial axis must dominate ≥75%; trajectory must agree with target direction.
+3. An 18-frame event-centred window (aligned to the motion peak) is extracted into a **38-feature vector** and saved with a direction label.
+
+**HUD indicators while learning (bottom-right):**
+- `LEARN  12 rec  [R=regular T=test]` — orange.
+- `! imbalanced` appended if one direction has 3× more samples than another.
+- `● REC` red flash in Fruit Slice only (centre-top) on each capture.
+
+**Guided learning (Bricks & Snake only):**
+
+Press **G** in learn mode to enable guided mode. The game walks through directions one at a time, requiring 8 clean captures each before advancing:
+
+```
+GUIDED RIGHT 3/8 [G=manual]        ← Snake (all 4 dirs)
+GUIDED RIGHT 3/8 [G=manual]        ← Bricks (right and left only)
+```
+
+While guided is active, a synthetic target is placed in the prompted direction so `IntentLabeler` can label samples even without a real game object nearby. Press **G** again to return to free-form learning. Completing all directions and pressing **G** resets the flow.
+
+**Session data** is saved to:
+
+```
+data/gestures/{username}/sessions/session_YYYYMMDD_HHMMSS.json
+```
+
+---
+
+### Test mode
+
+Press **T** to switch to model-driven control.
+
+- The ML model (a Random Forest, 60 trees, balanced class weights) predicts the intended direction from the current IMU buffer.
+- Predictions are smoothed over 4 frames: the game only acts when one direction holds ≥60% of recent predictions.
+- If confidence is below 55% or no consensus exists, control falls back to raw gyro at reduced scale — the game never freezes.
+
+**How test mode drives each game:**
+
+| Game | What the model controls |
+|------|------------------------|
+| Bricks | `get_cursor_delta()` dx mapped to `paddle_velocity` (left/right only) |
+| Snake | `get_cursor_delta()` dx/dy thresholded at 0.10 to trigger direction changes |
+| Fruit Slice | `get_cursor_delta()` dx/dy integrated directly into cursor position |
+
+**HUD indicators (bottom-right):**
+- `TEST  MODEL READY  [V=validate  R=regular  L=learn]` — cyan.
+- `TEST  NO MODEL  (no data yet — press L)` — orange.
+
+The model retrains from all saved sessions automatically whenever you leave learn or test mode.
+
+---
+
+### Validation panel
+
+Press **V** in test mode to open the panel. Session-aware stratified k-fold CV runs in a background thread so the game keeps playing.
+
+**Compact panel** (Bricks & Snake — less intrusive):
+```
+MODEL VALIDATION  [V close]
+
+Accuracy: 87%
+120 samples  6 sessions
+
+Dir  F1   P   R    n
+────────────────────────────
+R    91%  89%  93%  30
+L    88%  90%  86%  30
+
+FP rate: 8%    Unsure: 12%
+```
+
+**Detailed panel** (Fruit Slice — includes confusion matrix and tip):
+```
+MODEL VALIDATION  [V close]
+
+Accuracy: 87%
+120 samples  6 sessions  5 folds
+
+Dir  F1   P   R    n
+────────────────────────────
+R    91%  89%  93%  30  ...
+
+FP rate: 8%    Unsure: 12%    Latency: ~0.18ms
+
+Confusion (true→pred):
+     R   L   U   D
+R    27  1   1   1  ...
+
+Tip: practice ↓ down (F1=83%)
+```
+
+**What the metrics mean:**
+
+| Metric | What to aim for |
+|--------|----------------|
+| Accuracy | ≥ 80% is good; ≥ 90% is excellent |
+| F1 per direction | ≥ 80% for each direction |
+| FP rate | < 15% is acceptable |
+| Unsure (abstain rate) | High = model needs more data |
+
+The **Tip** line (Fruit Slice only) names the weakest direction when its F1 < 80%. Press **V** again to close.
+
+---
+
+### Tips for a good model
+
+1. **Collect at least 10 samples total** before the first training. 20+ per direction is ideal.
+2. **Use guided mode** (Bricks/Snake) to build a balanced dataset quickly — it automatically targets each direction in turn.
+3. **Multiple short sessions** across days train a more robust model than one long session.
+4. **Check class balance** — `! imbalanced` in the HUD means one direction dominates; focus there.
+5. **Run validation** after each session — the Tip line (Fruit Slice) or per-direction F1 table shows exactly where to improve.
 
 ---
 
@@ -348,6 +524,15 @@ In ASTRA mode, hold the tilt gesture for 0.35 s before it registers.
 2. Tilt left/right and forward/back to steer.
 3. Eat the red food dot to grow. Avoid your own tail (and walls in VEERA mode).
 
+### Playing Fruit Slice
+
+1. Fruits arc upward from the bottom of the screen. Sweep the cursor over them to slice.
+2. In sensor mode, yaw your wrist left/right and pitch it forward/back — the glowing cursor follows.
+3. In keyboard mode, move the mouse over fruits to slice them.
+4. **VEERA mode:** avoid bombs (grey circles with fuses) — slicing one costs a life.
+5. **ASTRA mode:** no bombs, generous hit zones, auto-aim pulls the cursor toward the nearest fruit.
+6. Press **L** to start training gestures, **T** to let the model drive, **V** (in test mode) to see accuracy stats.
+
 ### Understanding Calibrate
 
 1. Open the Calibrate card from the home screen (sensor mode only).
@@ -364,23 +549,28 @@ In ASTRA mode, hold the tilt gesture for 0.35 s before it registers.
 
 ```
 Bricks/
-├── main.py                   Entry point — arg parsing, pygame init, session loop
-├── home.py                   HomeScreen — game selection menu (2 or 3 cards)
-├── requirements.txt          Python dependencies
-├── SETUP.md                  Detailed hardware setup & troubleshooting
+├── main.py                      Entry point — arg parsing, pygame init, session loop
+├── home.py                      HomeScreen — scrollable game selection (3 visible cards)
+├── requirements.txt             Python dependencies (includes scikit-learn)
+├── SETUP.md                     Detailed hardware setup & troubleshooting
 │
 ├── shared/
-│   ├── sensor.py             MetaMotionSensor — BLE thread, IMUSample dataclass
-│   ├── gesture.py            GestureInterpreter, GestureState, KeyboardFallback
-│   └── audio.py              Audio manager
+│   ├── sensor.py                MetaMotionSensor — BLE thread, IMUSample dataclass
+│   ├── gesture.py               GestureInterpreter, GestureState, KeyboardFallback
+│   ├── gesture_learner.py       GestureLearningSystem — per-user model at data/gestures/{username}/
+│   ├── learn_test_support.py    GuidedLearnFlow, shared HUD renderers, synthetic_target_xy
+│   ├── username_screen.py       UsernameScreen — shown at startup; profiles at data/profiles/
+│   └── audio.py                 Audio manager
 │
 └── games/
     ├── bricks/
-    │   └── game.py           BricksGame(screen, clock).run(gesture_src) → "home"
+    │   └── game.py              BricksGame(screen, clock, …, username).run(gs) → "home"
     ├── snake/
-    │   └── game.py           SnakeGame(screen, clock).run(gesture_src) → "home"
+    │   └── game.py              SnakeGame(screen, clock, …, username).run(gs) → "home"
+    ├── fruit_ninja/
+    │   └── game.py              FruitNinjaGame(screen, clock, …, username, game_submode).run(gs) → "home"
     └── calibration/
-        └── game.py           CalibrationGame — 4-panel IMU visualizer
+        └── game.py              CalibrationGame — 4-panel IMU visualizer
 ```
 
 ### Key data types
