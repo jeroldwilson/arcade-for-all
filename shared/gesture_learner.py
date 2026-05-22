@@ -62,19 +62,11 @@ except ImportError:
 # Schema version — increment when feature format changes (old records are skipped)
 SCHEMA_VERSION = 2
 
-# Rolling pre-trigger buffer: 30 frames @ ~60 Hz ≈ 500 ms look-back
-BUFFER_FRAMES    = 30
-# Frames extracted centered on motion peak
-EVENT_FRAMES     = 18
-
-# SmartRecorder quality thresholds
-MOTION_MAG_MIN   = 25.0    # °/s minimum gyro magnitude for intentional motion
-COOLDOWN_SECS    = 0.6     # minimum seconds between successive recordings
-ERRATIC_STD_MAX  = 180.0   # maximum gyro-mag std (rejects random shaking)
-
-# Labeling: require one spatial axis to dominate by this fraction (rejects diagonals)
-# threshold = 0.5 + AMBIGUITY_MARGIN; with 0.25 → must be ≥75% along one axis
-AMBIGUITY_MARGIN = 0.25
+# Rolling pre-trigger buffer: 60 frames @ ~60 Hz ≈ 1000 ms look-back
+# Increased for accessible needs to capture slower, wider movement arcs
+BUFFER_FRAMES    = 60
+# Frames extracted centered on motion peak (approx 600 ms)
+EVENT_FRAMES     = 36
 
 # Log a warning when any class has this many × more samples than the smallest class
 BALANCE_WARN_RATIO = 3.0
@@ -99,12 +91,27 @@ class GestureProfile:
     confidence_threshold: float = 0.55  # abstain below this confidence
     smoothing_frames: int = 4           # frames for temporal majority vote
     max_speed_scale: float = 1.0        # cap on cursor speed multiplier
+    # Learning thresholds
+    motion_mag_min: float = 25.0        # °/s minimum gyro magnitude for motion
+    erratic_std_max: float = 180.0      # max gyro std (rejects random shaking)
+    ambiguity_margin: float = 0.25      # requires dominant axis (0.25 = 75%)
+    cooldown_secs: float = 0.6          # min time between recordings
 
 
 PROFILE_STANDARD   = GestureProfile(
-    dead_zone=15.0, confidence_threshold=0.55, smoothing_frames=4, max_speed_scale=1.0)
+    dead_zone=15.0, confidence_threshold=0.55, smoothing_frames=4, max_speed_scale=1.0,
+    motion_mag_min=25.0, erratic_std_max=180.0, ambiguity_margin=0.25, cooldown_secs=0.6
+)
+
+# ACCESSIBLE profile customized for kids with movement disabilities / CP:
+# - Lower motion minimum so weak movements trigger
+# - Extremely high erratic max so tremors/spasms are learned, not rejected
+# - 0.0 ambiguity margin: accepts diagonal/arcing motions
+# - Longer cooldown: prevents multiple triggers from a single long spasm
 PROFILE_ACCESSIBLE = GestureProfile(
-    dead_zone=6.0,  confidence_threshold=0.45, smoothing_frames=6, max_speed_scale=0.75)
+    dead_zone=6.0,  confidence_threshold=0.45, smoothing_frames=6, max_speed_scale=0.75,
+    motion_mag_min=12.0, erratic_std_max=999.0, ambiguity_margin=0.0, cooldown_secs=1.5
+)
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -257,6 +264,7 @@ class IntentLabeler:
         blade_xy: Tuple[float, float],
         fruits_xy: List[Tuple[float, float]],
         blade_history: Optional[List[Tuple[float, float]]] = None,
+        ambiguity_margin: float = 0.25,
     ) -> Optional[str]:
         """
         Returns direction label or None if:
@@ -277,9 +285,9 @@ class IntentLabeler:
         if total < 1e-6:
             return None
 
-        # Require one axis to dominate by AMBIGUITY_MARGIN (rejects diagonals)
+        # Require one axis to dominate (rejects diagonals)
         dom_frac = max(abs_dx, abs_dy) / total
-        if dom_frac < (0.5 + AMBIGUITY_MARGIN):
+        if dom_frac < (0.5 + ambiguity_margin):
             return None
 
         direction = ("right" if dx > 0 else "left") if abs_dx >= abs_dy \
@@ -290,10 +298,11 @@ class IntentLabeler:
             traj_dx = blade_history[-1][0] - blade_history[0][0]
             traj_dy = blade_history[-1][1] - blade_history[0][1]
             if math.hypot(traj_dx, traj_dy) > 20:
-                if direction == "right" and traj_dx < -20: return None
-                if direction == "left"  and traj_dx >  20: return None
-                if direction == "down"  and traj_dy < -20: return None
-                if direction == "up"    and traj_dy >  20: return None
+                # Only reject if strictly opposite, allow orthogonal/arcing
+                if direction == "right" and traj_dx < -40: return None
+                if direction == "left"  and traj_dx >  40: return None
+                if direction == "down"  and traj_dy < -40: return None
+                if direction == "up"    and traj_dy >  40: return None
 
         return direction
 
@@ -335,6 +344,7 @@ class SmartRecorder:
         fruits_xy: List[Tuple[float, float]],
         session_id: str = "",
         mode: str = "standard",
+        profile: GestureProfile = PROFILE_STANDARD,
     ) -> bool:
         """Attempt to record an event-centered gesture window. Returns True if recorded."""
 
@@ -342,11 +352,11 @@ class SmartRecorder:
             return False
 
         now = time.monotonic()
-        if now - self._last_rec < COOLDOWN_SECS:
+        if now - self._last_rec < profile.cooldown_secs:
             return False
 
         gyro_mag = math.sqrt(gs.abs_gx**2 + gs.abs_gy**2 + gs.abs_gz**2)
-        if gyro_mag < MOTION_MAG_MIN:
+        if gyro_mag < profile.motion_mag_min:
             return False
 
         window = self._buf.snapshot()
@@ -356,7 +366,7 @@ class SmartRecorder:
         mags   = [math.sqrt(s.gx**2 + s.gy**2 + s.gz**2) for s in window]
         mean_m = sum(mags) / len(mags)
         std_m  = math.sqrt(sum((v - mean_m) ** 2 for v in mags) / len(mags))
-        if std_m > ERRATIC_STD_MAX:
+        if std_m > profile.erratic_std_max:
             return False
 
         # Event-centering: extract window centered on motion peak
@@ -374,6 +384,7 @@ class SmartRecorder:
         label = IntentLabeler.label(
             blade_xy, fruits_xy,
             blade_history=list(self._blade_history),
+            ambiguity_margin=profile.ambiguity_margin
         )
         if label is None:
             return False
@@ -847,6 +858,7 @@ class GestureLearningSystem:
             gs, blade_xy, fruits_xy,
             session_id=self._session_id,
             mode=mode,
+            profile=self._profile
         )
         if recorded:
             self._last_rec_flash = time.monotonic()

@@ -785,7 +785,9 @@ class FruitNinjaGame:
 
     def _update_spawn(self, dt: float) -> None:
         self._spawn_cd -= dt
-        if self._spawn_cd > 0 or len(self._fruits) >= 8:
+        # Phase 2: In learn mode, only allow 1 fruit to guarantee clean AI data
+        max_fruits = 1 if self._game_submode == "learn" else 8
+        if self._spawn_cd > 0 or len(self._fruits) >= max_fruits:
             return
         self._spawn_fruit()
         if self._mode == "accessible":

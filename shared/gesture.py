@@ -30,9 +30,10 @@ All thresholds are adjustable via the GestureConfig dataclass.
 import time
 import queue
 import threading
+import math
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from shared.sensor import IMUSample
 from shared.fusion_processor import FusionProcessor
@@ -77,6 +78,10 @@ class GestureConfig:
     # Minimum seconds between gesture triggers on each axis.
     # Used by game modules in accessible mode; GestureInterpreter ignores it.
     gesture_cooldown: float = 0.8
+
+    # Functional alignment angle (radians).
+    # Compensates for sensor being mounted twisted on the wrist or contractures in the arm.
+    yaw_offset_rads: float = 0.0
 
 
 # ── Gesture state ─────────────────────────────────────────────────────────────
@@ -244,6 +249,31 @@ class GestureInterpreter:
             self.state.calibrated = False
         print("[gesture] Recalibration started — hold sensor still…")
 
+    def align_functional_axis(self, tilt_samples: List[Tuple[float, float]]) -> None:
+        """
+        Phase 4: Medical-Grade Functional Calibration (PCA).
+        Takes a list of raw (tilt_x, tilt_y) points from a natural arm motion,
+        finds the primary axis of motion, and rotates the coordinates to match it.
+        """
+        n = len(tilt_samples)
+        if n < 10:
+            return
+            
+        mean_x = sum(v[0] for v in tilt_samples) / n
+        mean_y = sum(v[1] for v in tilt_samples) / n
+        
+        cxx = sum((v[0] - mean_x)**2 for v in tilt_samples)
+        cxy = sum((v[0] - mean_x)*(v[1] - mean_y) for v in tilt_samples)
+        cyy = sum((v[1] - mean_y)**2 for v in tilt_samples)
+        
+        if cxx == cyy and cxy == 0:
+            return
+            
+        angle = 0.5 * math.atan2(2 * cxy, cxx - cyy)
+        with self._lock:
+            self.config.yaw_offset_rads = angle
+        print(f"[gesture] PCA Functional Calibration: Rotated axes by {math.degrees(angle):.1f}°")
+
     def get_state(self) -> GestureState:
         """Thread-safe snapshot of the latest gesture state."""
         with self._lock:
@@ -305,16 +335,23 @@ class GestureInterpreter:
         self._smooth_az = a * s.az + (1 - a) * self._smooth_az
         self._smooth_gz = a * s.gz + (1 - a) * self._smooth_gz
 
-        # ── Auto-calibration ───────────────────────────────────────────────
-        # Collect the first N smoothed samples to establish the neutral
-        # gravity vector.  During this phase, paddle stays at zero.
+        # ── Medical-Grade Adaptive Baseline (Washout Filter) ───────────────
+        # Instead of a strict 1-second static calibration, we continuously
+        # drag the baseline toward the current position VERY slowly.
+        # This accommodates children who cannot hold still, and adapts if
+        # their resting posture changes due to fatigue or spasticity.
         if not self._calibrated:
             self._cal_buf.append((self._smooth_ax, self._smooth_ay, self._smooth_az))
             if len(self._cal_buf) >= cfg.calibration_samples:
+                # Use median instead of mean to ignore large tremor spikes
+                sorted_ax = sorted(v[0] for v in self._cal_buf)
+                sorted_ay = sorted(v[1] for v in self._cal_buf)
+                sorted_az = sorted(v[2] for v in self._cal_buf)
+                
                 n = len(self._cal_buf)
-                self._cal_ax = sum(v[0] for v in self._cal_buf) / n
-                self._cal_ay = sum(v[1] for v in self._cal_buf) / n
-                self._cal_az = sum(v[2] for v in self._cal_buf) / n
+                self._cal_ax = sorted_ax[n // 2]
+                self._cal_ay = sorted_ay[n // 2]
+                self._cal_az = sorted_az[n // 2]
                 self._calibrated = True
                 self._cal_buf.clear()
                 print(
@@ -326,12 +363,32 @@ class GestureInterpreter:
                 self.state.launch = False
                 self.state.calibrated = False
             return
+        else:
+            # Continuous adaptation: if they are relatively still (not actively 
+            # swiping), slowly pull the baseline to their current resting state.
+            gyro_mag = math.sqrt(s.gx**2 + s.gy**2 + s.gz**2)
+            if gyro_mag < 45.0:  # Allow for tremors, but ignore big swipes
+                # alpha = 0.002 at 100Hz means it takes about 5 seconds to fully adapt
+                # to a new resting posture.
+                adapt_rate = 0.002
+                self._cal_ax = adapt_rate * self._smooth_ax + (1 - adapt_rate) * self._cal_ax
+                self._cal_ay = adapt_rate * self._smooth_ay + (1 - adapt_rate) * self._cal_ay
+                self._cal_az = adapt_rate * self._smooth_az + (1 - adapt_rate) * self._cal_az
 
         # ── Tilt from gravity vector relative to calibrated neutral ────────
         # When the wrist tilts sideways, lateral gravity (ax) increases while
         # vertical gravity (az) decreases.  Subtracting the neutral ax gives
         # the pure tilt component, independent of sensor mounting orientation.
-        tilt = self._smooth_ax - self._cal_ax
+        raw_tilt_x = self._smooth_ax - self._cal_ax
+        raw_tilt_y = self._smooth_ay - self._cal_ay
+        
+        # Phase 4: Apply functional alignment rotation (PCA)
+        # This aligns the physical motion axis with the game's X/Y axis
+        cos_off = math.cos(cfg.yaw_offset_rads)
+        sin_off = math.sin(cfg.yaw_offset_rads)
+        
+        tilt = raw_tilt_x * cos_off - raw_tilt_y * sin_off
+        aligned_tilt_y = raw_tilt_x * sin_off + raw_tilt_y * cos_off
 
         thr   = cfg.tilt_threshold
         t_max = cfg.tilt_max
@@ -345,7 +402,7 @@ class GestureInterpreter:
             velocity  = magnitude if tilt > 0 else -magnitude
 
         # ── Forward/back tilt (ay axis) for Snake up/down control ─────────
-        tilt_y_raw = self._smooth_ay - self._cal_ay
+        tilt_y_raw = aligned_tilt_y
         if abs(tilt_y_raw) < thr:
             tilt_y = 0.0
         else:
