@@ -237,6 +237,7 @@ class MetaMotionSensor:
         self._sf_notify_count: int = 0
         self._using_sf: bool = False  # True when streaming via module 0x19 instead of raw 0x03/0x13
         self._address: Optional[str] = None  # stored in connect() for reconnect-after-SF-disconnect
+        self._shutdown_event: Optional[asyncio.Event] = None
 
     # ── Public sync API (for use from game / main thread) ─────────────────────
 
@@ -255,12 +256,8 @@ class MetaMotionSensor:
 
     def stop_background(self) -> None:
         """Signal the BLE thread to stop cleanly."""
-        if self._loop and self._loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._teardown(), self._loop)
-            try:
-                fut.result(timeout=5)  # wait so the loop doesn't close mid-teardown
-            except Exception:
-                pass
+        if self._loop and self._loop.is_running() and self._shutdown_event:
+            self._loop.call_soon_threadsafe(self._shutdown_event.set)
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -339,6 +336,7 @@ class MetaMotionSensor:
         # Create the notification event in the BLE event loop so connect()
         # can await it to confirm CCCD notifications are actually arriving.
         self._notify_event = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
         if address is None:
             logger.error("No MetaMotion device found.")
             return
@@ -346,12 +344,8 @@ class MetaMotionSensor:
         if not self._connected:
             return
         await self.start_streaming()
-        # Keep the loop alive until cancelled
-        try:
-            while self._streaming:
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            pass
+        if self._streaming:
+            await self._shutdown_event.wait()
         await self._teardown()
 
     async def _teardown(self) -> None:

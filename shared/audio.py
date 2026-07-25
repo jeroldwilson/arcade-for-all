@@ -119,9 +119,13 @@ class AudioManager:
 
         self._bg_sound      = self._to_sound(self._build_bg_loop())
         self._collect_sound = self._to_sound(self._build_collect())
+        self._flick_cast_sound = self._to_sound(self._build_flick_cast())
+        self._complete_fanfare_sound = self._to_sound(self._build_complete_fanfare())
 
         self._bg_sound.set_volume(0.30)
         self._collect_sound.set_volume(0.70)
+        self._flick_cast_sound.set_volume(0.65)
+        self._complete_fanfare_sound.set_volume(0.75)
 
     # ── Wave generators ───────────────────────────────────────────────────────
 
@@ -208,6 +212,41 @@ class AudioManager:
             self._square_tone(NOTES['C6'], 0.20, amp=0.28),
         ])
 
+    def _build_flick_cast(self) -> np.ndarray:
+        """Whoosh followed by a sparkle, for the flick gesture."""
+        # Whoosh: band-pass filtered noise
+        n_whoosh = int(self._rate * 0.15)
+        noise = np.random.normal(0, 1, n_whoosh)
+        # Simple bandpass: apply a sweeping sine wave as an envelope
+        t = np.linspace(0, 0.15, n_whoosh, endpoint=False)
+        freq_env = 800 + 2000 * t  # sweep from 800Hz to 1100Hz
+        whoosh_wave = noise * np.sin(_PI2 * freq_env * t)
+        # Fade in/out
+        env = np.ones(n_whoosh, dtype=np.float32)
+        env[:int(n_whoosh*0.2)] = np.linspace(0, 1, int(n_whoosh*0.2))
+        env[-int(n_whoosh*0.6):] = np.linspace(1, 0, int(n_whoosh*0.6))
+        whoosh = whoosh_wave * env * 0.4 * 32767
+
+        # Sparkle: high-pitched decaying sine
+        n_sparkle = int(self._rate * 0.3)
+        sparkle_wave = self._square_tone(NOTES['C6'], 0.3, amp=0.25)
+
+        # Combine: whoosh then sparkle starts slightly after
+        combined = np.zeros(int(self._rate * 0.4), dtype=np.float32)
+        combined[:n_whoosh] += whoosh.astype(np.float32)
+        combined[int(self._rate*0.05) : int(self._rate*0.05) + n_sparkle] += sparkle_wave.astype(np.float32)
+
+        return combined.clip(-32767, 32767).astype(np.int16)
+
+    def _build_complete_fanfare(self) -> np.ndarray:
+        """Short, triumphant fanfare for completing the calibration."""
+        return np.concatenate([
+            self._square_tone(NOTES['C5'], 0.1, amp=0.28),
+            self._square_tone(NOTES['E5'], 0.1, amp=0.28),
+            self._square_tone(NOTES['G5'], 0.1, amp=0.28),
+            self._square_tone(NOTES['C6'], 0.3, amp=0.30),
+        ])
+
     # ── pygame.Sound wrapper ──────────────────────────────────────────────────
 
     def _to_sound(self, mono: np.ndarray) -> "pygame.mixer.Sound":
@@ -225,6 +264,12 @@ class AudioManager:
     def play_collect(self) -> None:
         self._collect_sound.play()
 
+    def play_flick_cast(self) -> None:
+        self._flick_cast_sound.play()
+
+    def play_complete_fanfare(self) -> None:
+        self._complete_fanfare_sound.play()
+
 
 # ── Silent fallback ───────────────────────────────────────────────────────────
 
@@ -233,6 +278,8 @@ class _NullAudio:
     def start_background(self) -> None: pass
     def stop_background(self)  -> None: pass
     def play_collect(self)     -> None: pass
+    def play_flick_cast(self) -> None: pass
+    def play_complete_fanfare(self) -> None: pass
 
 
 def make_audio_manager():

@@ -36,7 +36,7 @@ DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
-GAMES = ["bricks", "snake", "fruit_ninja"]   # calibration added dynamically
+GAMES = ["bricks", "snake", "fruit_ninja"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
     "bricks": {
@@ -56,6 +56,12 @@ GAME_META = {
         "desc":    ["Slice flying fruits!", "Tilt & flick to swing blade.", "60 seconds, beat your score!"],
         "desc_ac": ["Slice flying fruits!", "Any movement slices!", "Move and have fun!"],
         "accent":  (255, 140, 60),
+    },
+    "magic_wand": {
+        "title":   "MAGIC WAND",
+        "desc":    ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
+        "desc_ac": ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
+        "accent":  (220, 120, 255),
     },
     "calibration": {
         "title":   "CALIBRATE",
@@ -116,6 +122,7 @@ class HomeScreen:
     def _compute_games(self) -> list:
         games = list(GAMES)
         if self.mode != "keyboard":
+            games.append("magic_wand")
             games.append("calibration")
         return games
 
@@ -187,6 +194,7 @@ class HomeScreen:
     # ── Public entry point ─────────────────────────────────────────────────────
 
     def run(self, gesture_src) -> str:
+        self._gesture_src = gesture_src
         pygame.mouse.set_visible(True)
         while True:
             dt = self._clock.tick(FPS) / 1000.0
@@ -229,6 +237,10 @@ class HomeScreen:
                 self._debug = not self._debug
             elif event.key == pygame.K_f:
                 self._toggle_fullscreen()
+            elif event.key == pygame.K_c:
+                # Trigger PCA Functional Calibration
+                if hasattr(self._gesture_src, "start_functional_calibration"):
+                    self._gesture_src.start_functional_calibration()
             elif event.key == pygame.K_ESCAPE:
                 pygame.quit()
                 sys.exit(0)
@@ -313,6 +325,20 @@ class HomeScreen:
                 self._draw_card(slot, global_idx, self._games[global_idx])
         self._draw_dots()
         self._draw_hint()
+        
+        gs = self._gesture_src.get_state() if hasattr(self, "_gesture_src") and self._gesture_src else None
+        if gs and getattr(gs, "functional_calibrating", False):
+            self._draw_overlay("CALIBRATING...", "Swing wrist LEFT and RIGHT repeatedly")
+
+    def _draw_overlay(self, title: str, subtitle: str = "") -> None:
+        dim = pygame.Surface((self._W, self._H), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 180))
+        self._screen.blit(dim, (0, 0))
+        t = self._font_title.render(title, True, TEXT_CLR)
+        self._screen.blit(t, t.get_rect(center=(self._W // 2, self._H // 2 - 20)))
+        if subtitle:
+            s = self._font_card.render(subtitle, True, DIM_CLR)
+            self._screen.blit(s, s.get_rect(center=(self._W // 2, self._H // 2 + 20)))
 
     def _draw_title(self) -> None:
         sc = self._sc
@@ -468,6 +494,8 @@ class HomeScreen:
             self._draw_snake_preview(area, dim)
         elif game_id == "fruit_ninja":
             self._draw_fruit_ninja_preview(area, dim)
+        elif game_id == "magic_wand":
+            self._draw_magic_wand_preview(area, dim)
         elif game_id == "calibration":
             self._draw_calibration_preview(area, dim)
 
@@ -568,6 +596,29 @@ class HomeScreen:
             ty = int(y0 + (y1 - y0) * t)
             pygame.draw.circle(self._screen, trail_clr, (tx, ty), max(2, int(3 * sc)))
 
+    def _draw_magic_wand_preview(self, area: pygame.Rect, dim: int) -> None:
+        sc = self._sc
+        cx, cy = area.centerx, area.centery
+        fade = dim / 255.0
+
+        # Wizard hat
+        hat_clr = tuple(min(255, int(c * fade)) for c in (80, 60, 150))
+        hat_h = int(30 * sc)
+        hat_w = int(25 * sc)
+        hat_y = cy - int(10 * sc)
+        pygame.draw.polygon(self._screen, hat_clr, [
+            (cx, hat_y - hat_h), (cx - hat_w, hat_y), (cx + hat_w, hat_y)
+        ])
+
+        # Wand
+        wand_clr = tuple(min(255, int(c * fade)) for c in (140, 90, 60))
+        wand_tip_clr = tuple(min(255, int(c * fade)) for c in (255, 255, 100))
+        wand_x, wand_y = cx + int(20 * sc), cy + int(20 * sc)
+        wand_len = int(40 * sc)
+        pygame.draw.line(self._screen, wand_clr, (wand_x, wand_y), (wand_x - wand_len, wand_y + wand_len), int(4 * sc))
+        tip_pos = (wand_x - wand_len, wand_y + wand_len)
+        pygame.draw.circle(self._screen, wand_tip_clr, tip_pos, int(5 * sc))
+
     def _draw_calibration_preview(self, area: pygame.Rect, dim: int) -> None:
         import math
         sc  = self._sc
@@ -633,6 +684,7 @@ class HomeScreen:
             ("Mouse",  "hover to choose • click to play"),
             ("Keys",   "← → to choose • Enter to play  •  F = fullscreen"),
             ("In-game", "L = Learn  •  T = Test  •  R = Regular mode"),
+            ("Calib.", "C = Functional Calibration (swing arm left/right)"),
         ]
         y = self._card_y + self._card_h + max(18, int(30 * sc))
         for label, text in controls:

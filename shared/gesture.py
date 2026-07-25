@@ -32,7 +32,7 @@ import queue
 import threading
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Tuple
 
 from shared.sensor import IMUSample
@@ -83,6 +83,34 @@ class GestureConfig:
     # Compensates for sensor being mounted twisted on the wrist or contractures in the arm.
     yaw_offset_rads: float = 0.0
 
+    # Flick-to-steer mode (for Snake)
+    flick_steer_enabled: bool = False
+    flick_steer_threshold: float = 160.0  # °/s, lower than launch flick
+    flick_steer_cooldown: float = 0.5     # seconds between directional flicks
+    flick_steer_window: int = 7           # samples to check for peak
+
+
+# Pre-defined configs for different game modes.
+# The main application can select which config to pass to the GestureInterpreter.
+
+CONFIG_STANDARD = GestureConfig()
+
+# ASTRA / Accessible mode: lower thresholds, longer cooldowns, and disabled spin
+# make the game more forgiving for users with movement disabilities.
+CONFIG_ACCESSIBLE = GestureConfig(
+    tilt_threshold=0.04,      # More sensitive to small tilts
+    tilt_max=0.4,             # Reach full speed with less effort
+    flick_threshold=120.0,    # Lower flick threshold for launching
+    twist_dead_zone=999.0,    # Effectively disables ball spin control
+    launch_cooldown=1.0,      # Longer cooldown to prevent accidental double-launches
+    gesture_cooldown=1.2,
+)
+
+# Variant of accessible mode for Snake that uses discrete flicks to turn.
+CONFIG_ACCESSIBLE_FLICK_STEER = replace(
+    CONFIG_ACCESSIBLE,
+    flick_steer_enabled=True
+)
 
 # ── Gesture state ─────────────────────────────────────────────────────────────
 
@@ -129,6 +157,12 @@ class GestureState:
     slice_active : bool  — True if a slice gesture was detected this frame
     slice_direction : str  — direction of slice ("left"/"right"/"up"/"down"/"diagonal_*")
     combo_count : int  — number of slices detected within the last 1.5 seconds
+
+    Flick-to-steer (for Snake):
+    steer_left : bool  — True for one frame on a leftward flick
+    steer_right : bool — True for one frame on a rightward flick
+    steer_up : bool    — True for one frame on a forward flick
+    steer_down : bool  — True for one frame on a backward flick
     """
     paddle_velocity: float = 0.0
     launch: bool = False
@@ -157,6 +191,13 @@ class GestureState:
     slice_active: bool = False
     slice_direction: str = ""
     combo_count: int = 0
+    # Flick-to-steer outputs
+    steer_left: bool = False
+    steer_right: bool = False
+    steer_up: bool = False
+    steer_down: bool = False
+    # Functional calibration
+    functional_calibrating: bool = False
     # BMM150 magnetometer calibration state (0 = offline … 3 = fully calibrated)
     mag_cal_state: int = 0
     # Bosch Kalman Filter hardware outputs (drift-free when hw_fusion_valid=True)
@@ -200,9 +241,17 @@ class GestureInterpreter:
         # Accumulation buffer for calibration samples
         self._cal_buf: List[tuple] = []
 
-        # Rolling window for flick detection (stores recent gy samples)
-        self._gy_window: deque = deque(maxlen=self.config.flick_window)
+        self._functional_calibrating: bool = False
+        self._functional_cal_buf: List[Tuple[float, float]] = []
 
+        # Rolling window for flick detection (stores recent gy samples)
+        self._gy_window: deque = deque(maxlen=self.config.flick_window) # For launch
+        # Windows for flick-to-steer
+        self._gx_steer_window: deque = deque(maxlen=self.config.flick_steer_window)
+        self._gy_steer_window: deque = deque(maxlen=self.config.flick_steer_window)
+
+
+        self._last_steer_time: float = 0.0
         self._last_launch_time: float = 0.0
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -248,6 +297,13 @@ class GestureInterpreter:
             self._cal_buf.clear()
             self.state.calibrated = False
         print("[gesture] Recalibration started — hold sensor still…")
+
+    def start_functional_calibration(self) -> None:
+        """Triggers a 2.5s window to learn the natural swing axis."""
+        with self._lock:
+            self._functional_calibrating = True
+            self._functional_cal_buf.clear()
+        print("[gesture] Functional calibration started — swing left and right...")
 
     def align_functional_axis(self, tilt_samples: List[Tuple[float, float]]) -> None:
         """
@@ -304,6 +360,12 @@ class GestureInterpreter:
                 slice_active=self.state.slice_active,
                 slice_direction=self.state.slice_direction,
                 combo_count=self.state.combo_count,
+                # Flick-to-steer
+                steer_left=self.state.steer_left,
+                steer_right=self.state.steer_right,
+                steer_up=self.state.steer_up,
+                steer_down=self.state.steer_down,
+                functional_calibrating=self.state.functional_calibrating,
                 mag_cal_state=self.state.mag_cal_state,
                 hw_heading=self.state.hw_heading,
                 hw_fusion_valid=self.state.hw_fusion_valid,
@@ -320,6 +382,10 @@ class GestureInterpreter:
                 with self._lock:
                     self.state.paddle_velocity *= 0.85
                     self.state.launch = False
+                    self.state.steer_left = False
+                    self.state.steer_right = False
+                    self.state.steer_up = False
+                    self.state.steer_down = False
                 continue
             self._process(sample)
 
@@ -382,13 +448,25 @@ class GestureInterpreter:
         raw_tilt_x = self._smooth_ax - self._cal_ax
         raw_tilt_y = self._smooth_ay - self._cal_ay
         
+        # Phase 4: Functional Calibration data collection
+        if self._functional_calibrating:
+            self._functional_cal_buf.append((raw_tilt_x, raw_tilt_y))
+            if len(self._functional_cal_buf) >= int(2.5 * 100):  # 2.5 secs @ 100 Hz
+                self.align_functional_axis(self._functional_cal_buf)
+                with self._lock:
+                    self._functional_calibrating = False
+                    self.state.functional_calibrating = False
+            else:
+                with self._lock:
+                    self.state.functional_calibrating = True
+
         # Phase 4: Apply functional alignment rotation (PCA)
         # This aligns the physical motion axis with the game's X/Y axis
         cos_off = math.cos(cfg.yaw_offset_rads)
         sin_off = math.sin(cfg.yaw_offset_rads)
         
-        tilt = raw_tilt_x * cos_off - raw_tilt_y * sin_off
-        aligned_tilt_y = raw_tilt_x * sin_off + raw_tilt_y * cos_off
+        tilt = raw_tilt_x * cos_off + raw_tilt_y * sin_off
+        aligned_tilt_y = -raw_tilt_x * sin_off + raw_tilt_y * cos_off
 
         thr   = cfg.tilt_threshold
         t_max = cfg.tilt_max
@@ -423,6 +501,41 @@ class GestureInterpreter:
             ):
                 launch = True
                 self._last_launch_time = now
+
+        # ── Flick-to-steer detection (Snake) ───────────────────────────────
+        # Sharp spike in gx (roll axis) = left/right flick.
+        # Sharp spike in gy (pitch axis) = forward/back flick.
+        steer_left = steer_right = steer_up = steer_down = False
+        if cfg.flick_steer_enabled:
+            self._gx_steer_window.append(s.gx)
+            self._gy_steer_window.append(s.gy)
+            now = time.monotonic()
+            if now - self._last_steer_time > cfg.flick_steer_cooldown:
+                # Check X-axis (roll) for left/right steering
+                if len(self._gx_steer_window) == cfg.flick_steer_window:
+                    gx_peak = max(self._gx_steer_window, key=abs)
+                    if abs(gx_peak) > cfg.flick_steer_threshold:
+                        if gx_peak > 0:
+                            steer_right = True
+                        else:
+                            steer_left = True
+                        self._last_steer_time = now
+
+                # Check Y-axis (pitch) for up/down steering (if no X-flick)
+                if not (steer_left or steer_right):
+                    if len(self._gy_steer_window) == cfg.flick_steer_window:
+                        gy_peak = max(self._gy_steer_window, key=abs)
+                        if abs(gy_peak) > cfg.flick_steer_threshold:
+                            # Pitch forward (nose down) = negative gy
+                            if gy_peak < 0:
+                                steer_up = True
+                            else:
+                                steer_down = True
+                            self._last_steer_time = now
+
+        # Reset launch flag after one frame
+        if self.state.launch:
+            launch = False
 
         # ── Spin from wrist twist (gz) ─────────────────────────────────────
         gz   = self._smooth_gz
@@ -481,6 +594,11 @@ class GestureInterpreter:
             self.state.slice_active    = slice_event is not None
             self.state.slice_direction = slice_event.direction if slice_event else ""
             self.state.combo_count     = self._slice.combo_count
+            # Flick-to-steer outputs
+            self.state.steer_left      = steer_left
+            self.state.steer_right     = steer_right
+            self.state.steer_up        = steer_up
+            self.state.steer_down      = steer_down
 
             # Mirror sensor state passively — never send BLE commands from this thread.
             if self._sensor is not None:

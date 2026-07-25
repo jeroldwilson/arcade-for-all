@@ -192,7 +192,7 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
         return gs, None
 
     from shared.sensor  import MetaMotionSensor
-    from shared.gesture import GestureInterpreter, GestureConfig
+    from shared.gesture import GestureInterpreter, CONFIG_STANDARD, CONFIG_ACCESSIBLE
 
     label = "MetaMotion SENSOR  [ASTRA]" if mode == "accessible" else "MetaMotion SENSOR  [VEERA]"
     _print_splash(label)
@@ -210,7 +210,7 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
         gs.start()
         return gs, None
 
-    cfg = GestureConfig()
+    cfg = CONFIG_ACCESSIBLE if mode == "accessible" else CONFIG_STANDARD
     gs  = GestureInterpreter(sensor.data_queue, cfg, sensor=sensor)
     gs.start()
     print("[main] Gesture interpreter started.")
@@ -254,15 +254,21 @@ def main() -> None:
 
     # ── Main selection loop ────────────────────────────────────────────────
     from home import HomeScreen
+    from shared.gesture import CONFIG_STANDARD, CONFIG_ACCESSIBLE, CONFIG_ACCESSIBLE_FLICK_STEER
     from games.bricks.game      import BricksGame
     from games.snake.game       import SnakeGame
     from games.fruit_ninja.game import FruitNinjaGame
+    from games.magic_wand.game  import MagicWandGame
 
     debug = args.debug   # tracks D-key toggles across home ↔ game transitions
     home = HomeScreen(screen, clock, mode=mode, username=username, debug=debug)
 
     try:
         while True:
+            # Ensure the home screen uses the base config (clears flick-to-steer)
+            if hasattr(gesture_src, "config"):
+                gesture_src.config = CONFIG_ACCESSIBLE if mode == "accessible" else CONFIG_STANDARD
+
             # pygame mutates the display surface in-place on resize, so we
             # compare the current size against the size home was laid out for.
             cur = pygame.display.get_surface()
@@ -272,6 +278,13 @@ def main() -> None:
             selected = home.run(gesture_src)
             mode  = home.mode    # may have been toggled on the home screen
             debug = home._debug  # preserve D-key toggle from home screen
+
+            # Apply game-specific configuration overrides
+            if hasattr(gesture_src, "config"):
+                if mode == "accessible":
+                    gesture_src.config = CONFIG_ACCESSIBLE_FLICK_STEER if selected == "snake" else CONFIG_ACCESSIBLE
+                else:
+                    gesture_src.config = CONFIG_STANDARD
 
             # Use the live display surface when creating each game.
             cur = pygame.display.get_surface()
@@ -291,6 +304,12 @@ def main() -> None:
             elif selected == "fruit_ninja":
                 game = FruitNinjaGame(cur, clock, debug=debug, mode=mode, audio=audio,
                                       username=username)
+                game.run(gesture_src)   # returns "home"
+                debug = game._debug
+
+            elif selected == "magic_wand":
+                game = MagicWandGame(cur, clock, debug=debug, mode=mode, audio=audio,
+                                     username=username)
                 game.run(gesture_src)   # returns "home"
                 debug = game._debug
 
