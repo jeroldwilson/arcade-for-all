@@ -88,8 +88,7 @@ class UsernameScreen:
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit(0)
+                    return "quit"
                 result = self._handle_event(event)
                 if result:
                     save_profile(result)

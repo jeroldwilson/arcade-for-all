@@ -250,7 +250,14 @@ def main() -> None:
 
     # ── Username prompt ────────────────────────────────────────────────────
     from shared.username_screen import UsernameScreen
-    username = UsernameScreen(screen, clock).run()
+    username_result = UsernameScreen(screen, clock).run()
+    if username_result == "quit":
+        gesture_src.stop()
+        if sensor is not None:
+            sensor.stop_background()
+        pygame.quit()
+        return
+    username = username_result
 
     # ── Main selection loop ────────────────────────────────────────────────
     from home import HomeScreen
@@ -259,6 +266,15 @@ def main() -> None:
     from games.snake.game       import SnakeGame
     from games.fruit_ninja.game import FruitNinjaGame
     from games.magic_wand.game  import MagicWandGame
+    from games.calibration.game import CalibrationGame
+
+    GAME_REGISTRY = {
+        "bricks":      BricksGame,
+        "snake":       SnakeGame,
+        "fruit_ninja": FruitNinjaGame,
+        "magic_wand":  MagicWandGame,
+        "calibration": CalibrationGame,
+    }
 
     debug = args.debug   # tracks D-key toggles across home ↔ game transitions
     home = HomeScreen(screen, clock, mode=mode, username=username, debug=debug)
@@ -279,6 +295,9 @@ def main() -> None:
             mode  = home.mode    # may have been toggled on the home screen
             debug = home._debug  # preserve D-key toggle from home screen
 
+            if selected == "quit":
+                break
+
             # Apply game-specific configuration overrides
             if hasattr(gesture_src, "config"):
                 if mode == "accessible":
@@ -289,36 +308,14 @@ def main() -> None:
             # Use the live display surface when creating each game.
             cur = pygame.display.get_surface()
 
-            if selected == "bricks":
-                game = BricksGame(cur, clock, debug=debug, mode=mode, audio=audio,
-                                  username=username)
-                game.run(gesture_src)   # returns "home"
+            game_cls = GAME_REGISTRY.get(selected)
+            if game_cls is not None:
+                game = game_cls(cur, clock, debug=debug, mode=mode, audio=audio,
+                                username=username)
+                result = game.run(gesture_src)
                 debug = game._debug
-
-            elif selected == "snake":
-                game = SnakeGame(cur, clock, debug=debug, mode=mode, audio=audio,
-                                 username=username)
-                game.run(gesture_src)   # returns "home"
-                debug = game._debug
-
-            elif selected == "fruit_ninja":
-                game = FruitNinjaGame(cur, clock, debug=debug, mode=mode, audio=audio,
-                                      username=username)
-                game.run(gesture_src)   # returns "home"
-                debug = game._debug
-
-            elif selected == "magic_wand":
-                game = MagicWandGame(cur, clock, debug=debug, mode=mode, audio=audio,
-                                     username=username)
-                game.run(gesture_src)   # returns "home"
-                debug = game._debug
-
-            elif selected == "calibration":
-                from games.calibration.game import CalibrationGame
-                game = CalibrationGame(cur, clock, debug=debug, mode=mode, audio=audio,
-                                       username=username)
-                game.run(gesture_src)   # returns "home"
-                debug = game._debug
+                if result == "quit":
+                    break
 
             home._debug = debug  # sync debug state back into home screen
 

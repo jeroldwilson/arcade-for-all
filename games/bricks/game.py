@@ -143,6 +143,15 @@ class Ball:
         pygame.draw.circle(surf, (200, 230, 255), (int(self.x), int(self.y)), self.r, 2)
 
 
+_POWERUP_FONT_CACHE: dict = {}
+
+def _get_powerup_font(size: int = 11) -> "pygame.font.Font":
+    """Return a cached monospace bold font at the requested size."""
+    if size not in _POWERUP_FONT_CACHE:
+        _POWERUP_FONT_CACHE[size] = pygame.font.SysFont("monospace", size, bold=True)
+    return _POWERUP_FONT_CACHE[size]
+
+
 @dataclass
 class PowerUp:
     rect:  pygame.Rect
@@ -158,7 +167,7 @@ class PowerUp:
     def draw(self, surf: pygame.Surface, font_size: int = 11) -> None:
         colour = POWERUP_CLRS.get(self.kind, (200, 200, 200))
         pygame.draw.rect(surf, colour, self.rect, border_radius=4)
-        font = pygame.font.SysFont("monospace", font_size, bold=True)
+        font = _get_powerup_font(font_size)
         label = font.render(self.kind, True, (0, 0, 0))
         surf.blit(label, label.get_rect(center=self.rect.center))
 
@@ -374,8 +383,7 @@ class BricksGame:
     def _handle_events(self) -> Optional[str]:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit(0)
+                return "quit"
             elif event.type == pygame.KEYDOWN:
                 result = self._on_key(event.key)
                 if result:

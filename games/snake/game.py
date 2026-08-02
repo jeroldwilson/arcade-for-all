@@ -353,8 +353,7 @@ class SnakeGame:
     def _handle_events(self) -> Optional[str]:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit(0)
+                return "quit"
             elif event.type == pygame.KEYDOWN:
                 result = self._on_key(event.key)
                 if result:

@@ -120,8 +120,7 @@ class MagicWandGame:
     def _handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit(0)
+                return "quit"
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return "home"

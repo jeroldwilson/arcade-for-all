@@ -38,7 +38,6 @@ NOTES = {
 _Q  = 0.500   # quarter note
 _E  = 0.250   # eighth note
 _H  = 1.000   # half note
-_DE = 0.375   # dotted eighth
 
 
 # ── Upbeat kids-friendly melody (4 phrases × 4 bars) ─────────────────────────

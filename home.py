@@ -203,8 +203,7 @@ class HomeScreen:
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit(0)
+                    return "quit"
                 result = self._handle_event(event)
                 if result:
                     return result
@@ -242,8 +241,7 @@ class HomeScreen:
                 if hasattr(self._gesture_src, "start_functional_calibration"):
                     self._gesture_src.start_functional_calibration()
             elif event.key == pygame.K_ESCAPE:
-                pygame.quit()
-                sys.exit(0)
+                return "quit"
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self._hover_idx is not None:
                 global_idx = self._scroll_offset + self._hover_idx
