@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple
 
 import pygame
 from shared.learn_test_support import draw_gesture_debug_overlay
+from shared.game_experience import NebulaBg
 
 
 # ── Dimensions ────────────────────────────────────────────────────────────────
@@ -39,6 +40,12 @@ CARD_BG    = (30,  30,  52)
 GAMES = ["bricks", "snake", "fruit_ninja"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
+    "fruit_ninja": {
+        "title":   "FRUIT SLICE",
+        "desc":    ["Slice flying fruits!", "Tilt & flick to swing blade.", "60 seconds, beat your score!"],
+        "desc_ac": ["Slice flying fruits!", "Any movement slices!", "Move and have fun!"],
+        "accent":  (255, 140, 60),
+    },
     "bricks": {
         "title":   "BRICKS",
         "desc":    ["Break all the bricks!", "Tilt wrist to move paddle.", "Flick to launch ball."],
@@ -51,18 +58,12 @@ GAME_META = {
         "desc_ac": ["Eat food, grow longer!", "Move wrist — snake finds the way!", "Walls wrap, no game over!"],
         "accent":  (100, 240, 120),
     },
-    "fruit_ninja": {
-        "title":   "FRUIT SLICE",
-        "desc":    ["Slice flying fruits!", "Tilt & flick to swing blade.", "60 seconds, beat your score!"],
-        "desc_ac": ["Slice flying fruits!", "Any movement slices!", "Move and have fun!"],
-        "accent":  (255, 140, 60),
-    },
-    "magic_wand": {
-        "title":   "MAGIC WAND",
-        "desc":    ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
-        "desc_ac": ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
-        "accent":  (220, 120, 255),
-    },
+    # "magic_wand": {
+    #     "title":   "MAGIC WAND",
+    #     "desc":    ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
+    #     "desc_ac": ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
+    #     "accent":  (220, 120, 255),
+    # },
     "calibration": {
         "title":   "CALIBRATE",
         "desc":    ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
@@ -153,12 +154,14 @@ class HomeScreen:
         self._margin   = margin
         self._n_vis    = n_vis
 
-        self._font_title = pygame.font.SysFont("monospace", max(20, int(42 * sc)), bold=True)
-        self._font_sub   = pygame.font.SysFont("monospace", max( 8, int(14 * sc)))
-        self._font_card  = pygame.font.SysFont("monospace", max(14, int(22 * sc)), bold=True)
-        self._font_desc  = pygame.font.SysFont("monospace", max( 7, int(12 * sc)))
+        self._font_title = pygame.font.SysFont("Arial", max(20, int(42 * sc)), bold=True)
+        self._font_sub   = pygame.font.SysFont("Arial", max( 8, int(14 * sc)))
+        self._font_card  = pygame.font.SysFont("Arial", max(14, int(22 * sc)), bold=True)
+        self._font_desc  = pygame.font.SysFont("Arial", max( 7, int(12 * sc)))
 
         self._update_card_rects()
+        if not hasattr(self, "_nebula"):
+            self._nebula = NebulaBg()
 
     def _update_card_rects(self) -> None:
         """Recompute visible card rects based on current scroll offset."""
@@ -314,7 +317,9 @@ class HomeScreen:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw(self) -> None:
-        self._screen.fill(BG)
+        dt = self._clock.get_time() / 1000.0
+        self._nebula.update(dt)
+        self._nebula.draw(self._screen)
         self._draw_title()
         self._draw_scroll_indicators()
         for slot in range(self._n_vis):

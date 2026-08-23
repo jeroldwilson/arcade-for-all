@@ -350,6 +350,11 @@ class MetaMotionSensor:
         except Exception as exc:
             logger.error("BLE event loop error: %s", exc)
         finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
 
     async def _main(self, address: Optional[str]) -> None:

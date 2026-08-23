@@ -14,8 +14,12 @@ Collect sound: bright rising chime played when a fruit / brick is collected.
 
 import numpy as np
 import pygame
+import pathlib
+import random
+import os
 
 _PI2 = 2.0 * np.pi
+AUDIO_DIR = pathlib.Path(__file__).parent.parent / "assets" / "audio"
 
 # ── Note table (Hz) ───────────────────────────────────────────────────────────
 
@@ -116,12 +120,14 @@ class AudioManager:
         self._rate  = info[0]
         self._chans = info[2]
 
-        self._bg_sound      = self._to_sound(self._build_bg_loop())
+        # Pre-allocate a channel for voiceovers
+        self._voice_channel = pygame.mixer.Channel(7) if pygame.mixer.get_num_channels() >= 8 else pygame.mixer.Channel(0)
+        self._is_encouraging = False
+
         self._collect_sound = self._to_sound(self._build_collect())
         self._flick_cast_sound = self._to_sound(self._build_flick_cast())
         self._complete_fanfare_sound = self._to_sound(self._build_complete_fanfare())
 
-        self._bg_sound.set_volume(0.30)
         self._collect_sound.set_volume(0.70)
         self._flick_cast_sound.set_volume(0.65)
         self._complete_fanfare_sound.set_volume(0.75)
@@ -255,16 +261,49 @@ class AudioManager:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start_background(self) -> None:
-        self._bg_sound.play(loops=-1)
+        bgm_path = AUDIO_DIR / "shared" / "bgm" / "Building_Blocks_And_Bells.mp3"
+        if bgm_path.exists():
+            pygame.mixer.music.load(str(bgm_path))
+            pygame.mixer.music.set_volume(0.30)
+            pygame.mixer.music.play(loops=-1)
 
     def stop_background(self) -> None:
-        self._bg_sound.stop()
+        pygame.mixer.music.stop()
         
     def pause_background(self) -> None:
-        pygame.mixer.pause()
+        pygame.mixer.music.pause()
         
     def resume_background(self) -> None:
-        pygame.mixer.unpause()
+        pygame.mixer.music.unpause()
+
+    def play_encourage(self, username: str) -> None:
+        folder = AUDIO_DIR / "profiles" / username / "Encourage"
+        if not folder.exists():
+            return
+        files = list(folder.glob("*.mp3"))
+        if files:
+            f = random.choice(files)
+            snd = pygame.mixer.Sound(str(f))
+            pygame.mixer.music.pause()
+            self._voice_channel.play(snd)
+            self._is_encouraging = True
+
+    def play_success(self, username: str) -> None:
+        folder = AUDIO_DIR / "profiles" / username / "Success"
+        if not folder.exists():
+            return
+        files = list(folder.glob("*.mp3"))
+        if files:
+            f = random.choice(files)
+            snd = pygame.mixer.Sound(str(f))
+            pygame.mixer.music.stop() # Stop BGM completely on success
+            self._voice_channel.play(snd)
+
+    def update(self) -> None:
+        if self._is_encouraging:
+            if not self._voice_channel.get_busy():
+                self._is_encouraging = False
+                pygame.mixer.music.unpause()
 
     def play_collect(self) -> None:
         self._collect_sound.play()
@@ -284,6 +323,9 @@ class _NullAudio:
     def stop_background(self)  -> None: pass
     def pause_background(self) -> None: pass
     def resume_background(self) -> None: pass
+    def play_encourage(self, u: str) -> None: pass
+    def play_success(self, u: str) -> None: pass
+    def update(self) -> None: pass
     def play_collect(self)     -> None: pass
     def play_flick_cast(self) -> None: pass
     def play_complete_fanfare(self) -> None: pass
