@@ -259,6 +259,12 @@ class AudioManager:
 
     def stop_background(self) -> None:
         self._bg_sound.stop()
+        
+    def pause_background(self) -> None:
+        pygame.mixer.pause()
+        
+    def resume_background(self) -> None:
+        pygame.mixer.unpause()
 
     def play_collect(self) -> None:
         self._collect_sound.play()
@@ -276,6 +282,8 @@ class _NullAudio:
     """No-op audio used when mixer is unavailable."""
     def start_background(self) -> None: pass
     def stop_background(self)  -> None: pass
+    def pause_background(self) -> None: pass
+    def resume_background(self) -> None: pass
     def play_collect(self)     -> None: pass
     def play_flick_cast(self) -> None: pass
     def play_complete_fanfare(self) -> None: pass

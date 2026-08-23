@@ -101,16 +101,32 @@ _CMD_GYRO_UNSUB     = bytes([_MODULE_GYROSCOPE, 0x02, 0x00, 0x01])
 #                 rise_lo, rise_hi, high_lo, high_hi, fall_lo, fall_hi,
 #                 period_lo, period_hi, delay_lo, delay_hi, repeat]  — 17 bytes total
 _MODULE_LED         = 0x02
-_CMD_LED_GREEN      = bytes([
-    _MODULE_LED, 0x03, 0x00, 0x02,  # module, CONFIG=0x03, channel GREEN=0, fixed 0x02
-    0x1f, 0x1f,                      # high_intensity=31, low_intensity=31 (solid)
-    0x00, 0x00,                      # rise_time = 0 ms
-    0xe8, 0x03,                      # high_time  = 1000 ms
-    0x00, 0x00,                      # fall_time  = 0 ms
-    0xe8, 0x03,                      # period     = 1000 ms  (100 % duty = solid on)
-    0x00, 0x00,                      # delay      = 0 ms
-    0xff,                            # repeat     = indefinitely
-])
+
+def _build_led_cmd(channel: int = 0, blink: bool = False) -> bytes:
+    """Build LED config command. Channels: 0=Green, 1=Red, 2=Blue"""
+    # High intensity=31, low=31 (solid) or low=0 (blink)
+    low_int = 0x00 if blink else 0x1f
+    # Times in ms
+    rise = 0
+    fall = 0
+    if blink:
+        high_time = 250
+        period = 500
+    else:
+        high_time = 1000
+        period = 1000
+    
+    return bytes([
+        _MODULE_LED, 0x03, channel, 0x02,
+        0x1f, low_int,
+        rise & 0xFF, (rise >> 8) & 0xFF,
+        high_time & 0xFF, (high_time >> 8) & 0xFF,
+        fall & 0xFF, (fall >> 8) & 0xFF,
+        period & 0xFF, (period >> 8) & 0xFF,
+        0x00, 0x00, # delay
+        0xff,       # repeat indefinitely
+    ])
+
 _CMD_LED_PLAY       = bytes([_MODULE_LED, 0x01, 0x01])    # PLAY=0x01, manual mode
 _CMD_LED_STOP       = bytes([_MODULE_LED, 0x02, 0x01])    # STOP=0x02, clear=1
 
@@ -298,8 +314,10 @@ class MetaMotionSensor:
             logger.warning("save_calibration_to_nvm scheduling failed: %s", e)
 
     # Convenience sync wrappers that schedule async BLE writes on the BLE loop.
-    def set_ambient_light(self, on: bool = True) -> None:
-        """Turn the device LED on (solid green) or off. Safe to call from main thread.
+    def set_ambient_light(self, on: bool = True, color: int = 0, blink: bool = False) -> None:
+        """Turn the device LED on/off. Safe to call from main thread.
+        color: 0=Green, 1=Red, 2=Blue
+        blink: If True, flashes the LED. If False, solid.
 
         This schedules an async write on the BLE event loop; it returns
         immediately and does not block for the write to complete.
@@ -308,7 +326,7 @@ class MetaMotionSensor:
             logger.debug("set_ambient_light: sensor not connected yet (skipping)")
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._async_set_led(on), self._loop)
+            asyncio.run_coroutine_threadsafe(self._async_set_led(on, color, blink), self._loop)
         except Exception as e:
             logger.warning("set_ambient_light scheduling failed: %s", e)
 
@@ -472,7 +490,7 @@ class MetaMotionSensor:
         try:
             await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
             await asyncio.sleep(0.05)
-            await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_GREEN, response=True)
+            await write(METAWEAR_COMMAND_CHAR_UUID, _build_led_cmd(channel=0, blink=False), response=True)
             await asyncio.sleep(0.05)
             await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_PLAY,  response=True)
             logger.info("LED → solid green")
@@ -662,20 +680,20 @@ class MetaMotionSensor:
         logger.info("Streaming stopped.")
 
     # --- Async helpers used by sync wrappers --------------------------------
-    async def _async_set_led(self, on: bool = True) -> None:
-        """Async helper to set the LED solid green (on=True) or stop patterns (on=False)."""
+    async def _async_set_led(self, on: bool = True, color: int = 0, blink: bool = False) -> None:
+        """Async helper to set the LED. color: 0=Green, 1=Red, 2=Blue."""
         if not self._client or not self._connected:
             return
         try:
             write = self._client.write_gatt_char
             if on:
-                # Stop, write green pattern, play
+                # Stop, write pattern, play
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
                 await asyncio.sleep(0.02)
-                await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_GREEN, response=True)
+                await write(METAWEAR_COMMAND_CHAR_UUID, _build_led_cmd(channel=color, blink=blink), response=True)
                 await asyncio.sleep(0.02)
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_PLAY,  response=True)
-                logger.debug("LED cmd (async) → solid green")
+                logger.debug(f"LED cmd (async) → on (color={color}, blink={blink})")
             else:
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
                 logger.debug("LED cmd (async) → stopped")

@@ -243,6 +243,7 @@ class GestureInterpreter:
         self._q        = sensor_queue
         self.config    = config or GestureConfig()
         self.state     = GestureState()
+        self.sensor    = sensor
         self._lock     = threading.Lock()
 
         # Gravity-extraction low-pass filter — all 3 axes

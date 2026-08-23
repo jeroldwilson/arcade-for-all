@@ -32,6 +32,7 @@ from shared.learn_test_support import (
     draw_submode_indicator,
     draw_validation_panel,
 )
+from shared.game_experience import GameGoalsPrompt, InactivityMonitor, VisualEffects
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -59,7 +60,7 @@ GYRO_SCALE_Y_ACC = 9.0
 GYRO_DEAD_ACC    = 6.0   # tiny dead-zone: almost any movement registers
 GYRO_VISIBLE_ACC = 8.0   # cursor trail appears with very little motion
 GYRO_SLICE_ACC   = 8.0   # slice triggers with very little motion
-AUTO_AIM_PULL    = 580.0 # px/sec pull toward nearest fruit when moving (Astra)
+AUTO_AIM_PULL    = 250.0 # px/sec pull toward nearest fruit when moving (Astra)
 
 # Mouse movement (keyboard mode)
 MOUSE_MOVE_PX    = 4    # pixels mouse must move to count as slicing
@@ -553,6 +554,16 @@ class FruitNinjaGame:
 
     def run(self, gesture_src) -> str:
         self._gesture_src = gesture_src
+        
+        # Game Goals
+        self._goal = GameGoalsPrompt(self._screen, self._clock).run()
+        self._goal.start()
+        
+        # Sensor & Effects
+        self._sensor = getattr(gesture_src, "sensor", None)
+        self._inactivity = InactivityMonitor(self._username, self._sensor)
+        self._effects = VisualEffects(self._sensor)
+        
         self._reset()
         pygame.mouse.set_visible(False)
         if self._audio:
@@ -567,6 +578,30 @@ class FruitNinjaGame:
                 if self._audio:
                     self._audio.stop_background()
                 return result
+                
+            # Update Inactivity
+            gs = self._gesture_src.get_state() if self._gesture_src else None
+            is_moving = self._moving
+            if gs is not None and self._paused:
+                # If paused, _update_blade isn't running, so we check for motion directly
+                gyro_mag = math.hypot(gs.abs_gz, gs.abs_gy)
+                visible_thresh = 8.0 # GYRO_VISIBLE_ACC
+                is_moving = (gyro_mag >= visible_thresh) or gs.launch
+
+            is_manually_paused = self._paused and not self._inactivity.is_paused
+            
+            action = self._inactivity.update(is_moving, is_manually_paused)
+            if action == "PAUSE":
+                self._paused = True
+                self._effects.trigger_pause()
+                if self._audio:
+                    self._audio.pause_background()
+            elif action == "RESUME":
+                self._paused = False
+                self._effects.trigger_resume()
+                if self._audio:
+                    self._audio.resume_background()
+                
             if not self._paused and not self._game_over:
                 self._update(dt)
             self._draw()
@@ -575,6 +610,9 @@ class FruitNinjaGame:
     # ── State ─────────────────────────────────────────────────────────────────
 
     def _reset(self) -> None:
+        if hasattr(self, '_goal'):
+            self._goal.start()
+            
         self._score     = 0
         self._lives     = LIVES_START
         self._paused    = False
@@ -622,6 +660,11 @@ class FruitNinjaGame:
             if self._game_over:
                 return "home"
             self._paused = not self._paused
+            if self._audio:
+                if self._paused:
+                    self._audio.pause_background()
+                else:
+                    self._audio.resume_background()
         elif key == pygame.K_x and self._paused:
             return "home"
         elif key == pygame.K_r and self._game_over:
@@ -658,14 +701,14 @@ class FruitNinjaGame:
             self._learner.update(gs)
 
         self._update_blade(dt, gs)
+        
+        # Effects update
+        self._effects.update(dt)
 
-        if self._mode == "accessible":
-            self._timer -= dt
-            if self._timer <= 0:
-                self._timer = 0.0
-                self._game_over = True
-                self._stars = (3 if self._score >= STAR_3 else
-                               2 if self._score >= STAR_2 else 1)
+        if not self._game_over and self._goal.check_met(self._score):
+            self._game_over = True
+            self._stars = 3 # Can base on score if we want, but they reached goal!
+            self._effects.trigger_fireworks(self._W//2, self._H//2)
 
         self._update_spawn(dt)
         self._update_fruits(dt)
@@ -724,6 +767,8 @@ class FruitNinjaGame:
             px_y = self._gyro_px_y_acc if self._mode == "accessible" else self._gyro_px_y
 
             # Test mode: ML model predicts direction; normal: raw gyro integration
+            old_blade_x, old_blade_y = self._blade_x, self._blade_y
+            
             if self._game_submode == "test" and self._learner is not None:
                 tdx, tdy = self._learner.get_cursor_delta(gs, px_x, px_y, dt)
                 self._blade_x += tdx
@@ -731,6 +776,10 @@ class FruitNinjaGame:
             else:
                 self._blade_x += -gz * px_x * dt   # invert: yaw left → cursor left
                 self._blade_y += gy  * px_y * dt   # invert: raise hand → cursor up
+
+            actual_dx = self._blade_x - old_blade_x
+            actual_dy = self._blade_y - old_blade_y
+            actual_mag = math.hypot(actual_dx, actual_dy)
 
             gyro_mag       = math.hypot(gz, gy)
             visible_thresh = GYRO_VISIBLE_ACC if self._mode == "accessible" else GYRO_VISIBLE
@@ -742,7 +791,7 @@ class FruitNinjaGame:
 
             # Astra auto-aim: when moving, pull blade toward nearest fruit
             # Pull is proportional to distance so it feels assistive, not jarring
-            if self._mode == "accessible" and self._moving and self._fruits:
+            if self._mode == "accessible" and self._moving and self._fruits and actual_mag > 0.1:
                 nearest = min(
                     self._fruits,
                     key=lambda f: math.hypot(f.x - self._blade_x, f.y - self._blade_y),
@@ -751,11 +800,14 @@ class FruitNinjaGame:
                 dy = nearest.y - self._blade_y
                 d  = math.hypot(dx, dy)
                 if d > 1.0:
-                    # Stronger pull when fruit is further away, gentler when close
-                    pull_frac = min(1.0, d / (self._W * 0.3))
-                    pull = AUTO_AIM_PULL * pull_frac * self._sc * dt
-                    self._blade_x += dx / d * pull
-                    self._blade_y += dy / d * pull
+                    # Intent check: only pull if moving roughly towards the fruit (dot product > 0.3)
+                    dot = (actual_dx * dx + actual_dy * dy) / (actual_mag * d)
+                    if dot > 0.3:
+                        # Stronger pull when fruit is further away, gentler when close
+                        pull_frac = min(1.0, d / (self._W * 0.3))
+                        pull = AUTO_AIM_PULL * pull_frac * self._sc * dt
+                        self._blade_x += dx / d * pull
+                        self._blade_y += dy / d * pull
         else:
             self._moving = False
 
@@ -907,6 +959,7 @@ class FruitNinjaGame:
             self._spawn_halves(fruit)
             clr = JUICE_COLORS.get(fruit.kind, (200, 200, 200))
             self._spawn_juice(fruit.x, fruit.y, clr, fruit.r)
+            self._effects.trigger_point_gain(fruit.x, fruit.y)
 
             # Score float with combo indicator
             if combo > 1:
@@ -1001,6 +1054,7 @@ class FruitNinjaGame:
         self._draw_fruits()
         self._draw_particles()
         self._draw_trail()
+        self._effects.draw(self._screen)
         self._draw_score_floats()
         self._draw_hud()
         if self._miss_flash > 0:
@@ -1009,6 +1063,7 @@ class FruitNinjaGame:
             self._draw_debug()
         if self._paused:
             self._draw_overlay("PAUSED", "ESC to resume   X to menu")
+        self._inactivity.draw(self._screen)
         if self._game_over:
             self._draw_game_over()
         if self._show_validation and self._game_submode == "test":

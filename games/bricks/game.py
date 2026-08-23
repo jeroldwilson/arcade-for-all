@@ -37,6 +37,7 @@ from shared.learn_test_support import (
     draw_validation_panel,
     synthetic_target_xy,
 )
+from shared.game_experience import GameGoalsPrompt, InactivityMonitor, VisualEffects
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -315,6 +316,8 @@ class BricksGame:
     # ── State management ───────────────────────────────────────────────────────
 
     def _reset(self) -> None:
+        if hasattr(self, '_goal'):
+            self._goal.start()
         self._score     = 0
         self._lives     = LIVES_START
         self._level     = 1
