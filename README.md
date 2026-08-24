@@ -272,23 +272,30 @@ Four-panel aviation-style instrument display showing live sensor orientation. Op
 
 ---
 
-## Gesture Personalisation
+Bricks, Snake, and Fruit Slice can each learn your specific movement style and use a personal ML model to drive the game — no configuration required. All data and models are stored per-user under `data/gestures/{username}/`. 
 
-Bricks, Snake, and Fruit Slice can each learn your specific movement style and use a personal ML model to drive the game — no configuration required. All data and models are stored per-user under `data/gestures/{username}/`. The system is powered by `shared/gesture_learner.py` and shared UI utilities in `shared/learn_test_support.py`.
+The system supports two core ML gesture engine architectures:
+1. **Random Forest (v1):** Uses a 36-frame fixed-window statistical feature engineering classifier.
+2. **Dynamic Time Warping (v2):** Uses an orientation-invariant cumulative angle change sequence alignment template matcher. Optimized for atypical motor patterns and spasmodic movement.
 
-> **Requirement:** `scikit-learn` is listed in `requirements.txt`. If it is missing, learn/test mode shows an "UNAVAILABLE" warning in the HUD.
+### Engine Selection
+
+*   **At Startup:** Launch the game with `--engine rf` or `--engine dtw` (e.g. `python main.py --engine dtw`).
+*   **During Gameplay:** Press the **`M` key** at any time to toggle between the Random Forest and DTW engines.
+
+> **Requirement:** `scikit-learn` is listed in `requirements.txt` and is required for the Random Forest engine. The DTW engine does not require external ML packages. If missing, RF mode will show an "UNAVAILABLE" warning in the HUD.
 
 ---
 
 ### Submodes
 
-Three submodes can be toggled at any time **while any game is running**:
+Three submodes can be toggled at any time **while any game is running** to manage when the ML algorithms are active:
 
-| Key | Submode | What it does |
+| Key | Submode | What it does / When it is effective |
 |-----|---------|-------------|
-| **L** | Learn | Records labelled gesture samples as you play |
-| **T** | Test | Your personal ML model drives the paddle / snake / cursor instead of raw gyro |
-| **R** | Regular | Normal raw-gyro control; saves and retrains the model before returning |
+| **L** | Learn | **Inactive** (No model control). Automatically records labeled gesture samples or templates as you play with raw control. |
+| **T** | Test | **Active**. Your chosen ML Engine (RF or DTW) actively classifies gestures in real-time and drives the paddle / snake / cursor. |
+| **R** | Regular | **Inactive**. Normal raw-gyro physical control mapping (direct integration); saves and retrains the model before returning. |
 | **G** | Guided toggle | Switches between guided and manual learn (learn mode only; Bricks & Snake) |
 | **V** | Validation panel | Opens/closes the CV results panel (test mode only) |
 

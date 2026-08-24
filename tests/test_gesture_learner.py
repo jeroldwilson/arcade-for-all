@@ -31,8 +31,6 @@ from shared.gesture_learner import (
     MIN_TRAIN_SAMPLES,
     PROFILE_STANDARD,
     GestureBuffer,
-    GestureProfile,
-    GestureLearningSystem,
     GestureModel,
     GestureValidator,
     GestureDataset,
@@ -41,7 +39,10 @@ from shared.gesture_learner import (
     IntentLabeler,
     SmartRecorder,
     ValidationResult,
+    GestureProfile,
 )
+from shared.gesture_engine import GestureEngineManager
+
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ from shared.gesture_learner import (
 def _make_gs(abs_gx=0.0, abs_gy=0.0, abs_gz=0.0,
              abs_ax=0.0, abs_ay=0.0, abs_az=1.0,
              euler_roll=0.0, euler_pitch=0.0):
-    """Minimal GestureState stand-in with the fields GestureLearningSystem reads."""
+    """Minimal GestureState stand-in with the fields GestureEngineManager reads."""
     gs = types.SimpleNamespace(
         abs_gx=abs_gx, abs_gy=abs_gy, abs_gz=abs_gz,
         abs_ax=abs_ax, abs_ay=abs_ay, abs_az=abs_az,
@@ -85,7 +86,7 @@ class TestFallbackSignConvention(unittest.TestCase):
                             scale_x=5.0, scale_y=5.0, dt=1.0 / 60):
         """Drive get_cursor_delta through the no-model fallback path."""
         gs = _make_gs(abs_gx=0.0, abs_gy=gy, abs_gz=gz)
-        system = GestureLearningSystem.__new__(GestureLearningSystem)
+        system = GestureEngineManager.__new__(GestureEngineManager)
         system.buffer       = GestureBuffer()
         system.extractor    = FeatureExtractor()
         system.recorder     = SmartRecorder(system.buffer, system.extractor)

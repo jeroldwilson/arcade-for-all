@@ -401,11 +401,13 @@ class MetaMotionSensor:
 
         # UUID-based fallback
         for d in devices:
-            uuids = [str(u).lower() for u in (d.metadata.get("uuids") or [])]
-            if METAWEAR_SERVICE_UUID.lower() in uuids:
-                self._device_name = d.name or d.address
-                logger.info("MetaWear detected (by UUID): '%s'  [%s]", d.name, d.address)
-                return d.address
+            metadata = getattr(d, "metadata", None)
+            if isinstance(metadata, dict):
+                uuids = [str(u).lower() for u in (metadata.get("uuids") or [])]
+                if METAWEAR_SERVICE_UUID.lower() in uuids:
+                    self._device_name = d.name or d.address
+                    logger.info("MetaWear detected (by UUID): '%s'  [%s]", d.name, d.address)
+                    return d.address
 
         logger.warning("No MetaMotion device found in scan.")
         return None
@@ -509,12 +511,15 @@ class MetaMotionSensor:
 
     async def disconnect(self) -> None:
         if self._client and self._connected:
+            self._connected = False
             try:
                 await self._client.stop_notify(METAWEAR_NOTIFY_CHAR_UUID)
             except Exception:
                 pass  # already unsubscribed (e.g. double-teardown race or BLE drop)
-            await self._client.disconnect()
-            self._connected = False
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
             logger.info("Disconnected.")
 
     async def start_streaming(self) -> None:
@@ -703,7 +708,8 @@ class MetaMotionSensor:
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
                 logger.debug("LED cmd (async) → stopped")
         except Exception as e:
-            logger.warning("_async_set_led failed: %s", e)
+            if self._connected:
+                logger.warning("_async_set_led failed: %s", e)
 
     async def _async_vibrate(self, duration: float = 0.15) -> None:
         """Async helper to trigger haptic buzz for duration seconds."""
@@ -717,7 +723,8 @@ class MetaMotionSensor:
             await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, payload, response=True)
             logger.debug("Haptic (async) buzz sent")
         except Exception as e:
-            logger.warning("_async_vibrate failed: %s", e)
+            if self._connected:
+                logger.warning("_async_vibrate failed: %s", e)
 
     async def _async_write(self, payload: bytes) -> None:
         """Fire-and-forget GATT write (used for read-trigger commands)."""

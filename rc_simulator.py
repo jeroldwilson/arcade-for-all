@@ -11,7 +11,8 @@ import pygame
 
 from shared.sensor import MetaMotionSensor
 from shared.gesture import GestureInterpreter, CONFIG_ACCESSIBLE
-from shared.gesture_learner import GestureLearningSystem, PROFILE_ACCESSIBLE
+from shared.gesture_engine import GestureEngineManager
+from shared.gesture_learner import PROFILE_ACCESSIBLE
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 W, H = 800, 600
@@ -65,7 +66,7 @@ def main():
     
     print("Loading AI Model...")
     # NOTE: Be sure to use the SAME username you use when playing the games!
-    learner = GestureLearningSystem(username="my_kid", profile=PROFILE_ACCESSIBLE)
+    learner = GestureEngineManager(username="my_kid", profile=PROFILE_ACCESSIBLE)
     
     running = True
     while running:

@@ -497,12 +497,13 @@ class FruitNinjaGame:
         if self._learner is not None:
             return
         try:
-            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            from shared.gesture_engine import GestureEngineManager
+            from shared.gesture_learner import SKLEARN_AVAILABLE
             if not SKLEARN_AVAILABLE:
                 self._sklearn_missing = True
                 print("[fruit_ninja] scikit-learn not installed — learn/test mode unavailable.")
                 return
-            self._learner = GestureLearningSystem(username=self._username)
+            self._learner = GestureEngineManager(username=self._username)
             self._sklearn_missing = False
         except ImportError as exc:
             self._sklearn_missing = True
@@ -638,6 +639,9 @@ class FruitNinjaGame:
         self._last_move_ms = 0   # ticks of last meaningful movement
         self._blade_av = 0.0     # angular velocity magnitude (for trail effects)
         self._last_combo = 0     # combo count (cached for HUD)
+        self._actual_dx = 0.0
+        self._actual_dy = 0.0
+        self._actual_mag = 0.0
 
         # Trail: list of (x, y, ticks_ms)
         self._trail: List[Tuple[float, float, int]] = []
@@ -686,6 +690,10 @@ class FruitNinjaGame:
             self._switch_submode("learn")
         elif key == pygame.K_t:
             self._switch_submode("test")
+        elif key == pygame.K_m:
+            if self._learner is not None:
+                engine_name = self._learner.toggle_engine()
+                print(f"[fruit_ninja] Switched to ML Engine: {engine_name}")
         elif key == pygame.K_v and self._game_submode == "test":
             if self._learner is not None:
                 if not self._show_validation:
@@ -793,6 +801,10 @@ class FruitNinjaGame:
             actual_dx = self._blade_x - old_blade_x
             actual_dy = self._blade_y - old_blade_y
             actual_mag = math.hypot(actual_dx, actual_dy)
+            
+            self._actual_dx = actual_dx
+            self._actual_dy = actual_dy
+            self._actual_mag = actual_mag
 
             gyro_mag       = math.hypot(gz, gy)
             visible_thresh = GYRO_VISIBLE_ACC if self._mode == "accessible" else GYRO_VISIBLE
@@ -962,9 +974,31 @@ class FruitNinjaGame:
                     self._game_over = True
                     self._stars = 0
         else:
-            # Combo multiplier: 1x (no combo), 2x (1-2 combo), 3x (3+)
-            combo      = self._last_combo
-            multiplier = min(3, 1 + combo // 2)
+            if self._mode == "accessible":
+                # Astra mode dynamic bonus based on intentionality toward the fruit
+                if self._actual_mag > 0.1:
+                    # Vector from previous position to fruit
+                    fx_dir = fruit.x - (self._blade_x - self._actual_dx)
+                    fy_dir = fruit.y - (self._blade_y - self._actual_dy)
+                    f_dist = math.hypot(fx_dir, fy_dir)
+                    if f_dist > 0:
+                        dot = (self._actual_dx * fx_dir + self._actual_dy * fy_dir) / (self._actual_mag * f_dist)
+                        if dot > 0.7:
+                            multiplier = 3
+                        elif dot > 0.3:
+                            multiplier = 2
+                        else:
+                            multiplier = 1
+                    else:
+                        multiplier = 1
+                else:
+                    multiplier = 1
+                combo = 0 # No combo HUD logic needed in Astra
+            else:
+                # Combo multiplier: 1x (no combo), 2x (1-2 combo), 3x (3+)
+                combo      = self._last_combo
+                multiplier = min(3, 1 + combo // 2)
+                
             base_pts   = FRUIT_POINTS.get(fruit.kind, 10)
             points     = base_pts * multiplier
             self._score += points

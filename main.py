@@ -96,6 +96,10 @@ def parse_args() -> argparse.Namespace:
         "--verbose", "-v", action="store_true",
         help="Enable verbose logging"
     )
+    p.add_argument(
+        "--engine", choices=["rf", "dtw"], default="rf",
+        help="Default gesture engine to use (rf: Random Forest (v1), dtw: Dynamic Time Warping (v2))"
+    )
     return p.parse_args()
 
 
@@ -224,6 +228,9 @@ def main() -> None:
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    from shared.gesture_engine import GestureEngineManager
+    GestureEngineManager.DEFAULT_ENGINE = args.engine
 
     # Scan-only mode — no pygame needed
     if args.scan:

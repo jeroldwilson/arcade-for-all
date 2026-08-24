@@ -58,12 +58,12 @@ GAME_META = {
         "desc_ac": ["Eat food, grow longer!", "Move wrist — snake finds the way!", "Walls wrap, no game over!"],
         "accent":  (100, 240, 120),
     },
-    # "magic_wand": {
-    #     "title":   "MAGIC WAND",
-    #     "desc":    ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
-    #     "desc_ac": ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
-    #     "accent":  (220, 120, 255),
-    # },
+    "magic_wand": {
+        "title":   "MAGIC WAND",
+        "desc":    ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
+        "desc_ac": ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
+        "accent":  (220, 120, 255),
+    },
     "calibration": {
         "title":   "CALIBRATE",
         "desc":    ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
