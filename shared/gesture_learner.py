@@ -393,6 +393,7 @@ class SmartRecorder:
 
         self.recordings.append({
             "schema_version": SCHEMA_VERSION,
+            "algorithm":  "RandomForest",
             "features":   features,
             "label":      label,
             "time":       now,

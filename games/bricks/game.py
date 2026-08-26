@@ -37,6 +37,10 @@ from shared.learn_test_support import (
     draw_validation_panel,
     synthetic_target_xy,
 )
+from shared.game_experience import (
+    GameGoalsPrompt, InactivityMonitor, VisualEffects,
+    NebulaBg, StarField, make_glow,
+)
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -106,6 +110,7 @@ class Brick:
     rect: pygame.Rect
     hp:   int
     row:  int
+    is_bonus: bool = False
 
     @property
     def alive(self) -> bool:
@@ -114,13 +119,23 @@ class Brick:
     def hit(self) -> int:
         """Reduce HP by 1; return points scored."""
         self.hp -= 1
-        return (3 - self.hp) * 10 + 10
+        if self.is_bonus:
+            return 100
+        # Score based on row (higher rows = more points)
+        return (BRICK_ROWS - self.row) * 10
 
     def draw(self, surf: pygame.Surface) -> None:
         if not self.alive:
             return
-        colour = _brick_colour(self.row, self.hp)
-        pygame.draw.rect(surf, colour, self.rect, border_radius=3)
+        if self.is_bonus:
+            # Golden bonus brick
+            pygame.draw.rect(surf, (255, 215, 0), self.rect, border_radius=3)
+            # Add a shiny inner border
+            inner = self.rect.inflate(-4, -4)
+            pygame.draw.rect(surf, (255, 255, 200), inner, 1, border_radius=2)
+        else:
+            colour = _brick_colour(self.row, self.hp)
+            pygame.draw.rect(surf, colour, self.rect, border_radius=3)
         pygame.draw.rect(surf, (0, 0, 0), self.rect, 1, border_radius=3)
 
 
@@ -143,6 +158,15 @@ class Ball:
         pygame.draw.circle(surf, (200, 230, 255), (int(self.x), int(self.y)), self.r, 2)
 
 
+_POWERUP_FONT_CACHE: dict = {}
+
+def _get_powerup_font(size: int = 11) -> "pygame.font.Font":
+    """Return a cached monospace bold font at the requested size."""
+    if size not in _POWERUP_FONT_CACHE:
+        _POWERUP_FONT_CACHE[size] = pygame.font.SysFont("monospace", size, bold=True)
+    return _POWERUP_FONT_CACHE[size]
+
+
 @dataclass
 class PowerUp:
     rect:  pygame.Rect
@@ -158,7 +182,7 @@ class PowerUp:
     def draw(self, surf: pygame.Surface, font_size: int = 11) -> None:
         colour = POWERUP_CLRS.get(self.kind, (200, 200, 200))
         pygame.draw.rect(surf, colour, self.rect, border_radius=4)
-        font = pygame.font.SysFont("monospace", font_size, bold=True)
+        font = _get_powerup_font(font_size)
         label = font.render(self.kind, True, (0, 0, 0))
         surf.blit(label, label.get_rect(center=self.rect.center))
 
@@ -206,18 +230,22 @@ class BricksGame:
             self._learner.start_validation()
             self._show_validation = True
         self._init_layout(screen)
+        self._nebula   = NebulaBg()
+        self._starfield = StarField(n=100)
+        self._effects  = VisualEffects()
         self._reset()
 
     def _init_learner(self) -> None:
         if self._learner is not None:
             return
         try:
-            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            from shared.gesture_engine import GestureEngineManager
+            from shared.gesture_learner import SKLEARN_AVAILABLE
             if not SKLEARN_AVAILABLE:
                 self._sklearn_missing = True
                 print("[bricks] scikit-learn not installed — learn/test mode unavailable.")
                 return
-            self._learner = GestureLearningSystem(username=self._username)
+            self._learner = GestureEngineManager(username=self._username)
             self._sklearn_missing = False
         except ImportError as exc:
             self._sklearn_missing = True
@@ -265,9 +293,9 @@ class BricksGame:
         self._paddle_w_std = max(40, int(PADDLE_W * sc))
         self._paddle_w_acc = max(60, int(PADDLE_W_ACCESSIBLE * sc))
 
-        self._font_lg = pygame.font.SysFont("monospace", max(24, int(48 * sc)), bold=True)
-        self._font_md = pygame.font.SysFont("monospace", max(12, int(24 * sc)))
-        self._font_sm = pygame.font.SysFont("monospace", max( 8, int(14 * sc)))
+        self._font_lg = pygame.font.SysFont("Arial", max(24, int(48 * sc)), bold=True)
+        self._font_md = pygame.font.SysFont("Arial", max(12, int(24 * sc)))
+        self._font_sm = pygame.font.SysFont("Arial", max( 8, int(14 * sc)))
 
     def _toggle_fullscreen(self) -> None:
         """Switch between fullscreen (native res) and windowed (800×600)."""
@@ -306,6 +334,8 @@ class BricksGame:
     # ── State management ───────────────────────────────────────────────────────
 
     def _reset(self) -> None:
+        if hasattr(self, '_goal'):
+            self._goal.start()
         self._score     = 0
         self._lives     = LIVES_START
         self._level     = 1
@@ -352,7 +382,7 @@ class BricksGame:
 
     def _build_bricks(self, level: int) -> None:
         self._bricks.clear()
-        # Higher levels → more 2/3-hp bricks
+        # Higher levels → more 2/3-hp bricks and bonus bricks
         for row in range(BRICK_ROWS):
             for col in range(BRICK_COLS):
                 x = col * self._brick_w + self._brick_gap
@@ -364,9 +394,14 @@ class BricksGame:
                     hp = 2
                 else:
                     hp = 1
+                
+                # 5% chance for a bonus brick (or slightly higher on higher levels)
+                is_bonus = random.random() < (0.05 + level * 0.01)
+                if is_bonus: hp = 1 # Bonus bricks break in one hit
+                
                 self._bricks.append(Brick(
                     rect=pygame.Rect(x, y, self._brick_w - self._brick_gap, self._brick_h),
-                    hp=hp, row=row
+                    hp=hp, row=row, is_bonus=is_bonus
                 ))
 
     # ── Event handling ────────────────────────────────────────────────────────
@@ -374,8 +409,7 @@ class BricksGame:
     def _handle_events(self) -> Optional[str]:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit(0)
+                return "quit"
             elif event.type == pygame.KEYDOWN:
                 result = self._on_key(event.key)
                 if result:
@@ -420,6 +454,10 @@ class BricksGame:
             self._switch_submode("test")
         elif key == pygame.K_r and not (self._game_over or self._you_win):
             self._switch_submode("play")
+        elif key == pygame.K_m:
+            if self._learner is not None:
+                engine_name = self._learner.toggle_engine()
+                print(f"[bricks] Switched to ML Engine: {engine_name}")
         elif key == pygame.K_v and self._game_submode == "test":
             if self._learner is not None:
                 if not self._show_validation:
@@ -632,6 +670,12 @@ class BricksGame:
                 self._score += pts
                 if self._audio:
                     self._audio.play_collect()
+                # Particle burst when brick fully destroyed
+                if not brick.alive:
+                    clr = _brick_colour(brick.row, 1)
+                    self._effects.trigger_brick_destroy(
+                        float(br.centerx), float(br.centery), clr, n=14
+                    )
                 # Determine bounce axis
                 overlap_x = min(
                     abs(ball.x - br.left), abs(ball.x - br.right)
@@ -715,11 +759,18 @@ class BricksGame:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw(self) -> None:
-        self._screen.fill(BG)
+        # Animated deep-space background
+        dt = self._clock.get_time() / 1000.0
+        self._nebula.update(dt)
+        self._nebula.draw(self._screen)
+        self._starfield.update(dt)
+        self._starfield.draw(self._screen)
         self._draw_bricks()
         self._draw_powerups()
         self._draw_balls()
         self._draw_paddle()
+        self._effects.update(dt)
+        self._effects.draw(self._screen)
         self._draw_hud()
         if self._debug:
             self._draw_debug()

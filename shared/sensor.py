@@ -101,16 +101,32 @@ _CMD_GYRO_UNSUB     = bytes([_MODULE_GYROSCOPE, 0x02, 0x00, 0x01])
 #                 rise_lo, rise_hi, high_lo, high_hi, fall_lo, fall_hi,
 #                 period_lo, period_hi, delay_lo, delay_hi, repeat]  — 17 bytes total
 _MODULE_LED         = 0x02
-_CMD_LED_GREEN      = bytes([
-    _MODULE_LED, 0x03, 0x00, 0x02,  # module, CONFIG=0x03, channel GREEN=0, fixed 0x02
-    0x1f, 0x1f,                      # high_intensity=31, low_intensity=31 (solid)
-    0x00, 0x00,                      # rise_time = 0 ms
-    0xe8, 0x03,                      # high_time  = 1000 ms
-    0x00, 0x00,                      # fall_time  = 0 ms
-    0xe8, 0x03,                      # period     = 1000 ms  (100 % duty = solid on)
-    0x00, 0x00,                      # delay      = 0 ms
-    0xff,                            # repeat     = indefinitely
-])
+
+def _build_led_cmd(channel: int = 0, blink: bool = False) -> bytes:
+    """Build LED config command. Channels: 0=Green, 1=Red, 2=Blue"""
+    # High intensity=31, low=31 (solid) or low=0 (blink)
+    low_int = 0x00 if blink else 0x1f
+    # Times in ms
+    rise = 0
+    fall = 0
+    if blink:
+        high_time = 250
+        period = 500
+    else:
+        high_time = 1000
+        period = 1000
+    
+    return bytes([
+        _MODULE_LED, 0x03, channel, 0x02,
+        0x1f, low_int,
+        rise & 0xFF, (rise >> 8) & 0xFF,
+        high_time & 0xFF, (high_time >> 8) & 0xFF,
+        fall & 0xFF, (fall >> 8) & 0xFF,
+        period & 0xFF, (period >> 8) & 0xFF,
+        0x00, 0x00, # delay
+        0xff,       # repeat indefinitely
+    ])
+
 _CMD_LED_PLAY       = bytes([_MODULE_LED, 0x01, 0x01])    # PLAY=0x01, manual mode
 _CMD_LED_STOP       = bytes([_MODULE_LED, 0x02, 0x01])    # STOP=0x02, clear=1
 
@@ -141,13 +157,13 @@ _CMD_HAPTIC_BUZZ    = bytes([_MODULE_HAPTIC, 0x01, 0xF8, 0xF4, 0x01])
 # One-shot reads (response at reg = cmd & 0x7F):
 #   [0x19, 0x8B] → [0x19, 0x0B, cal_state_byte]
 _MODULE_SENSOR_FUSION  = 0x19
-# Write config: [module, MODE_reg=0x02, mode_byte=0x01 (NDOF), config_byte]
+# Write config: [module, MODE_reg=0x02, mode_byte=0x02 (IMUPlus), config_byte]
 # config_byte nibble format confirmed from MetaWear-SDK-Cpp:
 #   lower nibble = acc_range_enum  (0=±2G, 1=±4G, 2=±8G, 3=±16G)
 #   upper nibble = gyro_range_enum+1  (1=±2000dps, 2=±1000dps, 3=±500dps, 4=±250dps)
 # The original 0x0A used wrong packing (acc|gyro<<2) which is why it disconnected.
 # 0x31 = acc=±4G (lower=1), gyro=±500dps (upper=3, enum=2, written as 3=enum+1)
-_CMD_SF_MODE           = bytes([_MODULE_SENSOR_FUSION, 0x02, 0x01, 0x31])  # NDOF, acc±4G, gyro±500dps
+_CMD_SF_MODE           = bytes([_MODULE_SENSOR_FUSION, 0x02, 0x02, 0x31])  # IMUPlus, acc±4G, gyro±500dps
 _CMD_SF_EULER_EN       = bytes([_MODULE_SENSOR_FUSION, 0x08, 0x01])  # subscribe EULER_ANGLES (0x08)
 _CMD_SF_CAL_EN         = bytes([_MODULE_SENSOR_FUSION, 0x0B, 0x01])  # subscribe CALIBRATION_STATE (0x0B)
 _CMD_SF_START          = bytes([_MODULE_SENSOR_FUSION, 0x01, 0x01])  # start fusion
@@ -228,6 +244,10 @@ class MetaMotionSensor:
         # Counters for module-specific notifications
         self._acc_notify_count = 0
         self._gyro_notify_count = 0
+        # Dirty flags for raw fallback double-emit fix (2a):
+        # _emit_sample() is only called when BOTH acc and gyro have been updated.
+        self._acc_dirty: bool = False
+        self._gyro_dirty: bool = False
         # BMM150 magnetometer calibration state (0 = uncalibrated, 3 = fully calibrated)
         self._mag_cal_state: int = 0
         self._pending_cal_data: bytes = b''
@@ -237,6 +257,7 @@ class MetaMotionSensor:
         self._sf_notify_count: int = 0
         self._using_sf: bool = False  # True when streaming via module 0x19 instead of raw 0x03/0x13
         self._address: Optional[str] = None  # stored in connect() for reconnect-after-SF-disconnect
+        self._shutdown_event: Optional[asyncio.Event] = None
 
     # ── Public sync API (for use from game / main thread) ─────────────────────
 
@@ -255,12 +276,8 @@ class MetaMotionSensor:
 
     def stop_background(self) -> None:
         """Signal the BLE thread to stop cleanly."""
-        if self._loop and self._loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._teardown(), self._loop)
-            try:
-                fut.result(timeout=5)  # wait so the loop doesn't close mid-teardown
-            except Exception:
-                pass
+        if self._loop and self._loop.is_running() and self._shutdown_event:
+            self._loop.call_soon_threadsafe(self._shutdown_event.set)
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -285,7 +302,7 @@ class MetaMotionSensor:
                 self._async_write(_CMD_SF_READ_CAL_STATE), self._loop
             )
         except Exception as e:
-            print(f"[sensor] poll_mag_cal_state failed: {e}")
+            logger.warning("poll_mag_cal_state failed: %s", e)
 
     def save_calibration_to_nvm(self) -> None:
         """Read current sensor-fusion calibration offsets and persist them to NVM flash."""
@@ -294,32 +311,34 @@ class MetaMotionSensor:
         try:
             asyncio.run_coroutine_threadsafe(self._async_save_calibration(), self._loop)
         except Exception as e:
-            print(f"[sensor] save_calibration_to_nvm scheduling failed: {e}")
+            logger.warning("save_calibration_to_nvm scheduling failed: %s", e)
 
     # Convenience sync wrappers that schedule async BLE writes on the BLE loop.
-    def set_ambient_light(self, on: bool = True) -> None:
-        """Turn the device LED on (solid green) or off. Safe to call from main thread.
+    def set_ambient_light(self, on: bool = True, color: int = 0, blink: bool = False) -> None:
+        """Turn the device LED on/off. Safe to call from main thread.
+        color: 0=Green, 1=Red, 2=Blue
+        blink: If True, flashes the LED. If False, solid.
 
         This schedules an async write on the BLE event loop; it returns
         immediately and does not block for the write to complete.
         """
         if not self._loop or not self._client or not self._connected:
-            print("[sensor] set_ambient_light: sensor not connected yet (skipping)")
+            logger.debug("set_ambient_light: sensor not connected yet (skipping)")
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._async_set_led(on), self._loop)
+            asyncio.run_coroutine_threadsafe(self._async_set_led(on, color, blink), self._loop)
         except Exception as e:
-            print(f"[sensor] set_ambient_light scheduling failed: {e}")
+            logger.warning("set_ambient_light scheduling failed: %s", e)
 
     def vibrate(self, duration: float = 0.15) -> None:
         """Trigger a short haptic buzz (duration in seconds)."""
         if not self._loop or not self._client or not self._connected:
-            print("[sensor] vibrate: sensor not connected yet (skipping)")
+            logger.debug("vibrate: sensor not connected yet (skipping)")
             return
         try:
             asyncio.run_coroutine_threadsafe(self._async_vibrate(duration), self._loop)
         except Exception as e:
-            print(f"[sensor] vibrate scheduling failed: {e}")
+            logger.warning("vibrate scheduling failed: %s", e)
 
     # ── Internal async machinery ───────────────────────────────────────────────
 
@@ -331,6 +350,11 @@ class MetaMotionSensor:
         except Exception as exc:
             logger.error("BLE event loop error: %s", exc)
         finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
 
     async def _main(self, address: Optional[str]) -> None:
@@ -339,6 +363,7 @@ class MetaMotionSensor:
         # Create the notification event in the BLE event loop so connect()
         # can await it to confirm CCCD notifications are actually arriving.
         self._notify_event = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
         if address is None:
             logger.error("No MetaMotion device found.")
             return
@@ -346,12 +371,8 @@ class MetaMotionSensor:
         if not self._connected:
             return
         await self.start_streaming()
-        # Keep the loop alive until cancelled
-        try:
-            while self._streaming:
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            pass
+        if self._streaming:
+            await self._shutdown_event.wait()
         await self._teardown()
 
     async def _teardown(self) -> None:
@@ -365,7 +386,6 @@ class MetaMotionSensor:
     async def scan(self) -> Optional[str]:
         """Scan for the first MetaWear/MetaMotion device and return its address."""
         logger.info("Scanning for MetaMotion device (%.0fs)…", self.scan_timeout)
-        print(f"[sensor] Scanning for BLE devices ({self.scan_timeout:.0f}s)…")
 
         # NOTE: on macOS, Core Bluetooth assigns a per-host UUID instead of
         # the real MAC address.  bleak uses that UUID to connect correctly.
@@ -376,67 +396,64 @@ class MetaMotionSensor:
             name = d.name or ""
             if any(k in name for k in ("MetaWear", "MetaMotion", "MWC", "MMS")):
                 self._device_name = name
-                print(f"[sensor] MetaWear detected: '{name}'  [{d.address}]")
+                logger.info("MetaWear detected: '%s'  [%s]", name, d.address)
                 return d.address
 
         # UUID-based fallback
         for d in devices:
-            uuids = [str(u).lower() for u in (d.metadata.get("uuids") or [])]
-            if METAWEAR_SERVICE_UUID.lower() in uuids:
-                self._device_name = d.name or d.address
-                print(f"[sensor] MetaWear detected (by UUID): '{d.name}'  [{d.address}]")
-                return d.address
+            metadata = getattr(d, "metadata", None)
+            if isinstance(metadata, dict):
+                uuids = [str(u).lower() for u in (metadata.get("uuids") or [])]
+                if METAWEAR_SERVICE_UUID.lower() in uuids:
+                    self._device_name = d.name or d.address
+                    logger.info("MetaWear detected (by UUID): '%s'  [%s]", d.name, d.address)
+                    return d.address
 
         logger.warning("No MetaMotion device found in scan.")
-        print("[sensor] No MetaWear/MetaMotion device found.")
         return None
 
     async def connect(self, address: str) -> None:
         """Connect via BLE and enable notifications."""
         logger.info("Connecting to %s…", address)
-        print(f"[sensor] Connecting to {address}…")
         self._address = address
         self._client = BleakClient(address)
         try:
             await self._client.connect()
         except BleakError as e:
             logger.error("Connection failed: %s", e)
-            print(f"[sensor] Connection failed: {e}")
             return
 
         await asyncio.sleep(0.5)  # let connection fully stabilize before CCCD write
         self._connected = True
-        logger.info("Connected.")
-        print(f"[sensor] *** CONNECTED  name='{self._device_name}'  addr={address} ***")
+        logger.info("*** CONNECTED  name='%s'  addr=%s ***", self._device_name, address)
 
         # Enumerate GATT services so we can verify the expected UUIDs are present
-        print("[sensor] GATT services on device:")
         has_cmd_char    = False
         has_notify_char = False
         for svc in self._client.services:
-            print(f"  service  {svc.uuid}")
+            logger.debug("  service  %s", svc.uuid)
             for ch in svc.characteristics:
                 props = ",".join(ch.properties)
-                print(f"    char   {ch.uuid}  [{props}]")
+                logger.debug("    char   %s  [%s]", ch.uuid, props)
                 if ch.uuid.lower() == METAWEAR_COMMAND_CHAR_UUID.lower():
                     has_cmd_char = True
                 if ch.uuid.lower() == METAWEAR_NOTIFY_CHAR_UUID.lower():
                     has_notify_char = True
         if has_cmd_char and has_notify_char:
-            print("[sensor] ✓ MetaWear command + notify characteristics confirmed")
+            logger.debug("MetaWear command + notify characteristics confirmed")
         else:
-            print(f"[sensor] ✗ Expected chars missing — cmd={has_cmd_char} notify={has_notify_char}")
-            print(f"[sensor]   expected cmd    = {METAWEAR_COMMAND_CHAR_UUID}")
-            print(f"[sensor]   expected notify = {METAWEAR_NOTIFY_CHAR_UUID}")
+            logger.warning("Expected chars missing — cmd=%s notify=%s", has_cmd_char, has_notify_char)
+            logger.debug("  expected cmd    = %s", METAWEAR_COMMAND_CHAR_UUID)
+            logger.debug("  expected notify = %s", METAWEAR_NOTIFY_CHAR_UUID)
 
         # Register notification handler for all data coming back from the device
         try:
             await self._client.start_notify(
                 METAWEAR_NOTIFY_CHAR_UUID, self._notification_handler
             )
-            print("[sensor] Notification handler registered")
+            logger.debug("Notification handler registered")
         except Exception as e:
-            print(f"[sensor] start_notify FAILED: {e}")
+            logger.error("start_notify FAILED: %s", e)
             self._connected = False
             return
 
@@ -453,55 +470,57 @@ class MetaMotionSensor:
             if self._notify_event is None:
                 self._notify_event = asyncio.Event()
             await write(METAWEAR_COMMAND_CHAR_UUID, bytes([0x01, 0x80]), response=True)
-            print("[sensor] Sent module-info probe — waiting for notification…")
+            logger.debug("Sent module-info probe — waiting for notification…")
             try:
                 await asyncio.wait_for(self._notify_event.wait(), timeout=0.8)
             except asyncio.TimeoutError:
                 if self._notify_count == 0:
-                    print("[sensor] *** No notification received — CCCD subscription may not be active ***")
-                    print("[sensor]   (haptic works = write OK; no notification = read-back broken)")
+                    logger.warning("No notification received — CCCD subscription may not be active")
+                    logger.warning("  (haptic works = write OK; no notification = read-back broken)")
                 else:
-                    print(f"[sensor] ✓ Notifications confirmed ({self._notify_count} received so far)")
+                    logger.debug("Notifications confirmed (%d received so far)", self._notify_count)
             else:
-                print(f"[sensor] ✓ Notifications confirmed ({self._notify_count} received so far)")
+                logger.debug("Notifications confirmed (%d received so far)", self._notify_count)
         except Exception as e:
-            print(f"[sensor] Module-info probe failed: {e}")
+            logger.warning("Module-info probe failed: %s", e)
 
         # Request tighter BLE connection interval (mirrors SDK's mbl_mw_settings_set_connection_parameters)
         # The device asks the host for 7.5 ms intervals; give the stack 1.5 s to negotiate.
         try:
             await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_CONN_PARAMS, response=True)
-            print("[sensor] Connection parameters requested (7.5 ms interval)")
+            logger.debug("Connection parameters requested (7.5 ms interval)")
         except Exception as e:
-            print(f"[sensor] Connection params command failed (non-fatal): {e}")
+            logger.debug("Connection params command failed (non-fatal): %s", e)
         await asyncio.sleep(1.5)
 
         # Confirm connection with LED (solid green) + one haptic buzz
         try:
             await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
             await asyncio.sleep(0.05)
-            await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_GREEN, response=True)
+            await write(METAWEAR_COMMAND_CHAR_UUID, _build_led_cmd(channel=0, blink=False), response=True)
             await asyncio.sleep(0.05)
             await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_PLAY,  response=True)
-            print("[sensor] LED → solid green")
+            logger.info("LED → solid green")
         except Exception as e:
-            print(f"[sensor] LED command failed: {e}")
+            logger.warning("LED command failed: %s", e)
         try:
             await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_HAPTIC_BUZZ, response=True)
-            print("[sensor] Haptic buzz sent")
+            logger.debug("Haptic buzz sent")
         except Exception as e:
-            print(f"[sensor] Haptic command failed: {e}")
+            logger.warning("Haptic command failed: %s", e)
 
     async def disconnect(self) -> None:
         if self._client and self._connected:
+            self._connected = False
             try:
                 await self._client.stop_notify(METAWEAR_NOTIFY_CHAR_UUID)
             except Exception:
                 pass  # already unsubscribed (e.g. double-teardown race or BLE drop)
-            await self._client.disconnect()
-            self._connected = False
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
             logger.info("Disconnected.")
-            print("[sensor] Disconnected.")
 
     async def start_streaming(self) -> None:
         """
@@ -518,29 +537,29 @@ class MetaMotionSensor:
         async def _send(label: str, payload: bytes, with_response: bool = True) -> bool:
             # Look up self._client at call time so reconnect mid-sequence is handled.
             if not self._client:
-                print(f"[sensor]   FAILED {label}: no client")
+                logger.warning("  FAILED %s: no client", label)
                 return False
             try:
                 await self._client.write_gatt_char(
                     METAWEAR_COMMAND_CHAR_UUID, payload, response=with_response
                 )
-                print(f"[sensor]   sent {label}  {payload.hex()}  response={with_response}")
+                logger.debug("  sent %s  %s  response=%s", label, payload.hex(), with_response)
                 return True
             except Exception as e:
-                print(f"[sensor]   FAILED {label}: {e}")
+                logger.warning("  FAILED %s: %s", label, e)
                 return False
 
         # ── 1. Probe SF module ─────────────────────────────────────────────────
-        print("[sensor] Probing sensor fusion module 0x19…")
+        logger.debug("Probing sensor fusion module 0x19…")
         count_before = self._notify_count
         probe_ok = await _send("SF_PROBE", _CMD_SF_PROBE)
         await asyncio.sleep(0.35)
         sf_available = probe_ok and (self._notify_count > count_before)
-        print(f"[sensor] SF probe: {'available ✓' if sf_available else 'not available — using raw acc/gyro'}")
+        logger.info("SF probe: %s", 'available' if sf_available else 'not available — using raw acc/gyro')
 
         # ── 2a. Sensor Fusion path ─────────────────────────────────────────────
         if sf_available:
-            print("[sensor] Starting sensor fusion (NDOF — acc±4G gyro±500dps, config=0x31)…")
+            logger.info("Starting sensor fusion (IMUPlus — acc±4G gyro±500dps, config=0x31)…")
             # Pre-configure acc + gyro hardware modules BEFORE sending SF MODE.
             # The Bosch SF module picks up these config values when it starts.
             # We send CONFIG only — no subscribe/start so firmware stays quiescent.
@@ -562,11 +581,11 @@ class MetaMotionSensor:
                 ok = await _send(label, payload)
                 await asyncio.sleep(delay)
                 if not ok and label == "SF_MODE":
-                    print("[sensor] SF_MODE failed — aborting SF path, falling back to raw")
+                    logger.warning("SF_MODE failed — aborting SF path, falling back to raw")
                     sf_available = False
                     # If firmware disconnected us, reconnect before raw fallback
                     if not self._connected and self._address:
-                        print("[sensor] Device disconnected — reconnecting for raw fallback…")
+                        logger.info("Device disconnected — reconnecting for raw fallback…")
                         await asyncio.sleep(1.5)
                         try:
                             self._client = BleakClient(self._address)
@@ -576,9 +595,9 @@ class MetaMotionSensor:
                             await self._client.start_notify(
                                 METAWEAR_NOTIFY_CHAR_UUID, self._notification_handler
                             )
-                            print("[sensor] ✓ Reconnected — proceeding with raw acc/gyro")
+                            logger.info("Reconnected — proceeding with raw acc/gyro")
                         except Exception as re_exc:
-                            print(f"[sensor] Reconnect failed: {re_exc}")
+                            logger.error("Reconnect failed: %s", re_exc)
                             return
                     break
 
@@ -586,14 +605,14 @@ class MetaMotionSensor:
             self._streaming = True
             self._using_sf  = True
             logger.info("Streaming started (sensor fusion).")
-            print(f"[sensor] SF streaming started — waiting for corrected acc data…")
+            logger.debug("SF streaming started — waiting for corrected acc data…")
             for _ in range(20):        # up to 4 s
                 await asyncio.sleep(0.2)
                 if self._acc_notify_count > 0:
-                    print(f"[sensor] ✓ SF data flowing — acc={self._acc_notify_count} "
-                          f"euler={self._sf_notify_count} cal={self._mag_cal_state}")
+                    logger.info("SF data flowing — acc=%d euler=%d cal=%d",
+                                self._acc_notify_count, self._sf_notify_count, self._mag_cal_state)
                     return
-            print(f"[sensor] No SF data after 4s (acc={self._acc_notify_count}) — falling back to raw")
+            logger.warning("No SF data after 4s (acc=%d) — falling back to raw", self._acc_notify_count)
             # Clean up failed SF attempt
             for p in [_CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
                       _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP]:
@@ -603,7 +622,7 @@ class MetaMotionSensor:
             await asyncio.sleep(0.3)
 
         # ── 2b. Raw acc/gyro fallback ──────────────────────────────────────────
-        print("[sensor] Starting raw acc/gyro streaming…")
+        logger.info("Starting raw acc/gyro streaming…")
         for label, payload in [
             ("ACC_CONFIG",    _CMD_ACC_CONFIG),
             ("GYRO_CONFIG",   _CMD_GYRO_CONFIG),
@@ -623,10 +642,11 @@ class MetaMotionSensor:
         for _ in range(14):   # up to 2 s
             await asyncio.sleep(0.15)
             if self._acc_notify_count > 0 or self._gyro_notify_count > 0:
-                print(f"[sensor] ✓ Raw IMU data flowing — acc={self._acc_notify_count} gyro={self._gyro_notify_count}")
+                logger.info("Raw IMU data flowing — acc=%d gyro=%d",
+                            self._acc_notify_count, self._gyro_notify_count)
                 return
 
-        print("[sensor] No raw notifications — retrying without response…")
+        logger.warning("No raw notifications — retrying without response…")
         for payload in [_CMD_ACC_CONFIG, _CMD_GYRO_CONFIG,
                         _CMD_ACC_DATA_SUB, _CMD_GYRO_DATA_SUB,
                         _CMD_ACC_SUBSCRIBE, _CMD_GYRO_SUBSCRIBE,
@@ -637,7 +657,7 @@ class MetaMotionSensor:
             except Exception:
                 pass
         await asyncio.sleep(1.0)
-        print(f"[sensor] After retry: acc={self._acc_notify_count} gyro={self._gyro_notify_count}")
+        logger.warning("After retry: acc=%d gyro=%d", self._acc_notify_count, self._gyro_notify_count)
 
     async def stop_streaming(self) -> None:
         if not self._connected or not self._client:
@@ -670,25 +690,26 @@ class MetaMotionSensor:
         logger.info("Streaming stopped.")
 
     # --- Async helpers used by sync wrappers --------------------------------
-    async def _async_set_led(self, on: bool = True) -> None:
-        """Async helper to set the LED solid green (on=True) or stop patterns (on=False)."""
+    async def _async_set_led(self, on: bool = True, color: int = 0, blink: bool = False) -> None:
+        """Async helper to set the LED. color: 0=Green, 1=Red, 2=Blue."""
         if not self._client or not self._connected:
             return
         try:
             write = self._client.write_gatt_char
             if on:
-                # Stop, write green pattern, play
+                # Stop, write pattern, play
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
                 await asyncio.sleep(0.02)
-                await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_GREEN, response=True)
+                await write(METAWEAR_COMMAND_CHAR_UUID, _build_led_cmd(channel=color, blink=blink), response=True)
                 await asyncio.sleep(0.02)
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_PLAY,  response=True)
-                print("[sensor] LED cmd (async) → solid green")
+                logger.debug(f"LED cmd (async) → on (color={color}, blink={blink})")
             else:
                 await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_LED_STOP,  response=True)
-                print("[sensor] LED cmd (async) → stopped")
+                logger.debug("LED cmd (async) → stopped")
         except Exception as e:
-            print(f"[sensor] _async_set_led failed: {e}")
+            if self._connected:
+                logger.warning("_async_set_led failed: %s", e)
 
     async def _async_vibrate(self, duration: float = 0.15) -> None:
         """Async helper to trigger haptic buzz for duration seconds."""
@@ -700,9 +721,10 @@ class MetaMotionSensor:
             hi = (ms >> 8) & 0xFF
             payload = bytes([_MODULE_HAPTIC, 0x01, 0xF8, lo, hi])
             await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, payload, response=True)
-            print("[sensor] Haptic (async) buzz sent")
+            logger.debug("Haptic (async) buzz sent")
         except Exception as e:
-            print(f"[sensor] _async_vibrate failed: {e}")
+            if self._connected:
+                logger.warning("_async_vibrate failed: %s", e)
 
     async def _async_write(self, payload: bytes) -> None:
         """Fire-and-forget GATT write (used for read-trigger commands)."""
@@ -713,7 +735,7 @@ class MetaMotionSensor:
                 METAWEAR_COMMAND_CHAR_UUID, payload, response=True
             )
         except Exception as e:
-            print(f"[sensor] write failed ({payload.hex()}): {e}")
+            logger.warning("write failed (%s): %s", payload.hex(), e)
 
     async def _async_save_calibration(self) -> None:
         """Read current sensor-fusion cal data via BLE, then write it back to NVM."""
@@ -734,11 +756,11 @@ class MetaMotionSensor:
                 await self._client.write_gatt_char(
                     METAWEAR_COMMAND_CHAR_UUID, nvm_cmd, response=True
                 )
-                print(f"[sensor] Calibration saved to NVM ({len(self._pending_cal_data)} bytes)")
+                logger.info("Calibration saved to NVM (%d bytes)", len(self._pending_cal_data))
             else:
-                print("[sensor] No calibration data received — NVM save skipped")
+                logger.warning("No calibration data received — NVM save skipped")
         except Exception as e:
-            print(f"[sensor] _async_save_calibration failed: {e}")
+            logger.warning("_async_save_calibration failed: %s", e)
 
     # ── Notification parsing ───────────────────────────────────────────────────
 
@@ -755,10 +777,11 @@ class MetaMotionSensor:
             return
 
         self._notify_count += 1
-        # Print first 20 notifications + any SF module notification (always log SF)
+        # Log first 20 notifications at DEBUG level; every 100th thereafter
         is_sf = (len(data) >= 2 and data[0] == _MODULE_SENSOR_FUSION)
         if self._notify_count <= 20 or self._notify_count % 100 == 0 or is_sf:
-            print(f"[sensor] notification #{self._notify_count}  module=0x{data[0]:02x} reg=0x{data[1]:02x}  len={len(data)}  raw={data[:8].hex()}")
+            logger.debug("notification #%d  module=0x%02x reg=0x%02x  len=%d  raw=%s",
+                         self._notify_count, data[0], data[1], len(data), data[:8].hex())
 
         # signal the first notification to any waiter
         try:
@@ -801,7 +824,11 @@ class MetaMotionSensor:
             return
         x, y, z = struct.unpack_from("<hhh", payload)
         self._last_acc = (x * _ACC_SCALE, y * _ACC_SCALE, z * _ACC_SCALE)
-        self._emit_sample()
+        # Dirty-flag pair (2a): only emit when both acc and gyro have been updated
+        self._acc_dirty = True
+        if self._gyro_dirty:
+            self._emit_sample()
+            self._acc_dirty = self._gyro_dirty = False
 
     def _parse_gyro(self, payload: bytearray) -> None:
         """Parse 6-byte little-endian int16 x/y/z gyroscope payload."""
@@ -809,7 +836,11 @@ class MetaMotionSensor:
             return
         x, y, z = struct.unpack_from("<hhh", payload)
         self._last_gyro = (x * _GYRO_SCALE, y * _GYRO_SCALE, z * _GYRO_SCALE)
-        self._emit_sample()
+        # Dirty-flag pair (2a): only emit when both acc and gyro have been updated
+        self._gyro_dirty = True
+        if self._acc_dirty:
+            self._emit_sample()
+            self._acc_dirty = self._gyro_dirty = False
 
     def _parse_sf_corrected_acc(self, payload: bytearray) -> None:
         """Parse SF CORRECTED_ACC: MblMwCorrectedCartesianFloat = 3×float32 + uint8 accuracy."""
@@ -840,8 +871,8 @@ class MetaMotionSensor:
         self._last_euler = (heading, pitch, roll, heading)
         self._hw_fusion_valid = True
         if self._sf_notify_count <= 5 or self._sf_notify_count % 500 == 0:
-            print(f"[sensor] SF euler #{self._sf_notify_count}  "
-                  f"heading={heading:.1f}° pitch={pitch:.1f}° roll={roll:.1f}°")
+            logger.debug("SF euler #%d  heading=%.1f° pitch=%.1f° roll=%.1f°",
+                         self._sf_notify_count, heading, pitch, roll)
 
     def _parse_cal_state(self, payload: bytearray) -> None:
         """Parse [accel_cal, gyro_cal, mag_cal, sys_cal] sensor-fusion calibration state."""
@@ -853,12 +884,12 @@ class MetaMotionSensor:
         old = self._mag_cal_state
         self._mag_cal_state = mag_cal
         if mag_cal != old:
-            print(f"[sensor] Mag cal: {old}→{mag_cal}  (accel={accel_cal} gyro={gyro_cal})")
+            logger.info("Mag cal: %d→%d  (accel=%d gyro=%d)", old, mag_cal, accel_cal, gyro_cal)
 
     def _parse_cal_data(self, payload: bytearray) -> None:
         """Store raw calibration offset bytes received after a read-data request."""
         self._pending_cal_data = bytes(payload)
-        print(f"[sensor] Cal data received ({len(payload)} bytes)")
+        logger.debug("Cal data received (%d bytes)", len(payload))
 
     def _emit_sample(self) -> None:
         ax, ay, az = self._last_acc
@@ -875,7 +906,8 @@ class MetaMotionSensor:
         )
         self._sample_count += 1
         if self._sample_count % 50 == 1:
-            print(f"[sensor] sample #{self._sample_count}  acc=({ax:+.3f},{ay:+.3f},{az:+.3f})g  gyro=({gx:+.1f},{gy:+.1f},{gz:+.1f})°/s")
+            logger.debug("sample #%d  acc=(%+.3f,%+.3f,%+.3f)g  gyro=(%+.1f,%+.1f,%+.1f)°/s",
+                         self._sample_count, ax, ay, az, gx, gy, gz)
 
         # Non-blocking put — drop oldest if queue is full
         try:

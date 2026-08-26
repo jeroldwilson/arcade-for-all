@@ -8,7 +8,8 @@ and uses it to output robotic driving commands.
 import time
 from shared.sensor import MetaMotionSensor
 from shared.gesture import GestureInterpreter
-from shared.gesture_learner import GestureLearningSystem, PROFILE_ACCESSIBLE
+from shared.gesture_engine import GestureEngineManager
+from shared.gesture_learner import PROFILE_ACCESSIBLE
 
 def main():
     print("Starting MetaMotion BLE thread...")
@@ -21,7 +22,7 @@ def main():
     
     print("Loading AI Model...")
     # Load the profile customized for the child
-    learner = GestureLearningSystem(username="my_kid", profile=PROFILE_ACCESSIBLE)
+    learner = GestureEngineManager(username="my_kid", profile=PROFILE_ACCESSIBLE)
     
     if not learner.model_ready:
         print("No trained model found! Please play Fruit Ninja in Learn Mode first to train the AI.")

@@ -26,12 +26,19 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.gameplay_config import FRUIT_NINJA_ACCESSIBLE as _ACC, FRUIT_NINJA_STANDARD as _STD, INACTIVITY_CONFIG as _INACT
 from shared.learn_test_support import (
+    GuidedLearnFlow,
     build_validation_lines,
     draw_gesture_debug_overlay,
     draw_submode_indicator,
     draw_validation_panel,
 )
+from shared.game_experience import (
+    GameGoalsPrompt, InactivityMonitor, VisualEffects,
+    NebulaBg, KatanaTrail, JuiceSplatter, ComboFlash, make_glow,
+)
+from shared.assets import load_sprite, FRUIT_CATALOG
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -47,81 +54,79 @@ GRAVITY      = 380.0    # px/sec² downward
 
 # ── Gyro → cursor mapping ─────────────────────────────────────────────────────
 # Raw gyro in °/s.  Cursor velocity = gyro * scale (px per °).
-GYRO_SCALE_X  = 5.0     # px / (°/s) horizontal  (abs_gz → X)  — Veeran
-GYRO_SCALE_Y  = 5.0     # px / (°/s) vertical    (abs_gy → Y)  — Veeran
-GYRO_DEAD     = 18.0    # °/s dead-zone (prevents drift at rest) — Veeran
-GYRO_VISIBLE  = 35.0    # °/s magnitude to show cursor trail — Veeran
-GYRO_SLICE    = 35.0    # °/s magnitude to count as slicing — Veeran
+# ── Tuning constants — sourced from shared/gameplay_config.py ────────────────
+# Edit gameplay_config.py to change difficulty. Do NOT hardcode values here.
 
-# Astra (accessible) — much more responsive cursor
-GYRO_SCALE_X_ACC = 9.0   # higher sensitivity: small hand motion → big cursor move
-GYRO_SCALE_Y_ACC = 9.0
-GYRO_DEAD_ACC    = 6.0   # tiny dead-zone: almost any movement registers
-GYRO_VISIBLE_ACC = 8.0   # cursor trail appears with very little motion
-GYRO_SLICE_ACC   = 8.0   # slice triggers with very little motion
-AUTO_AIM_PULL    = 580.0 # px/sec pull toward nearest fruit when moving (Astra)
+# Veera (standard) cursor tuning
+GYRO_SCALE_X  = _STD.gyro_scale_x
+GYRO_SCALE_Y  = _STD.gyro_scale_y
+GYRO_DEAD     = _STD.gyro_dead
+GYRO_VISIBLE  = _STD.gyro_visible
+GYRO_SLICE    = _STD.gyro_slice
+
+# Astra (accessible) cursor tuning
+GYRO_SCALE_X_ACC = _ACC.gyro_scale_x
+GYRO_SCALE_Y_ACC = _ACC.gyro_scale_y
+GYRO_DEAD_ACC    = _ACC.gyro_dead
+GYRO_VISIBLE_ACC = _ACC.gyro_visible
+GYRO_SLICE_ACC   = _ACC.gyro_slice
+AUTO_AIM_PULL    = _ACC.auto_aim_pull
 
 # Mouse movement (keyboard mode)
-MOUSE_MOVE_PX    = 4    # pixels mouse must move to count as slicing
-CURSOR_HIDE_MS   = 300  # ms after last move before cursor vanishes
+MOUSE_MOVE_PX    = 4
+CURSOR_HIDE_MS   = 300
 
 # ── Game rules ────────────────────────────────────────────────────────────────
 LIVES_START   = 3
-ACC_DURATION  = 60       # seconds per session (accessible)
-STAR_3        = 20
-STAR_2        = 10
+ACC_DURATION  = _ACC.session_duration_sec
+STAR_3        = _ACC.star3_score
+STAR_2        = _ACC.star2_score
 
 # ── Spawn ─────────────────────────────────────────────────────────────────────
-SPAWN_INTERVAL     = 1.0
-SPAWN_INTERVAL_ACC_START = 2.8   # Astra: wide gap between fruits at start
-SPAWN_INTERVAL_ACC_FULL  = 1.8   # Astra: interval at full speed
-BOMB_PROB          = 0.13
+SPAWN_INTERVAL            = 1.0
+SPAWN_INTERVAL_ACC_START  = _ACC.spawn_interval_start
+SPAWN_INTERVAL_ACC_FULL   = _ACC.spawn_interval_full
+BOMB_PROB                 = 0.13
 
-# Veera mode speed progression (score-based)
-VEERA_GOAL_SCORE          = 40    # reach full speed at this many slices
-VY_VEERA_SLOW             = (-560, -440)  # gentle start (peak ~65–80% screen)
-VY_VEERA_FULL             = (-900, -740)  # full speed (peak reaches top/above)
-VX_VEERA_SLOW             = 80    # ± horizontal drift at start (px/s)
-VX_VEERA_FULL             = 190   # ± horizontal drift at full speed (px/s)
-SPAWN_INTERVAL_VEERA_SLOW = 2.0   # slow spawn at start
-SPAWN_INTERVAL_VEERA_FULL = 0.5   # fast spawn at full speed
+# Veera mode speed progression
+VEERA_GOAL_SCORE          = _STD.speed_full_score
+VY_VEERA_SLOW             = _STD.vy_slow
+VY_VEERA_FULL             = _STD.vy_full
+VX_VEERA_SLOW             = _STD.vx_slow
+VX_VEERA_FULL             = _STD.vx_full
+SPAWN_INTERVAL_VEERA_SLOW = _STD.spawn_interval_start
+SPAWN_INTERVAL_VEERA_FULL = _STD.spawn_interval_full
 
 # ── Astra adaptive fruit speed ────────────────────────────────────────────────
-# Speed ramps from SLOW at score 0 up to FULL at ACC_SPEED_FULL_SCORE slices.
 # With GRAVITY=380, peak heights:
 #   SLOW lo=-580: 580²/(2×380) ≈ 443 px (74% of screen)
-#   SLOW hi=-650: 650²/(2×380) ≈ 556 px (93% of screen)
-#   FULL lo=-660: 660²/(2×380) ≈ 573 px (96% of screen)
-#   FULL hi=-740: 740²/(2×380) ≈ 721 px (above top — fruit pops over the edge)
-ACC_VY_SLOW       = (-650, -580)   # gentle start — reaches 74–93% of screen
-ACC_VY_FULL       = (-740, -660)   # full Astra speed — reaches 96%–above top
-ACC_VX_SLOW       =  70            # ± horizontal drift at start (px/s)
-ACC_VX_FULL       = 140            # ± horizontal drift at full speed (px/s)
-ACC_SPEED_FULL_SCORE = 15          # reach full speed after this many slices
+#   FULL hi=-740: 740²/(2×380) ≈ 721 px (above top)
+ACC_VY_SLOW          = _ACC.vy_slow
+ACC_VY_FULL          = _ACC.vy_full
+ACC_VX_SLOW          = _ACC.vx_slow
+ACC_VX_FULL          = _ACC.vx_full
+ACC_SPEED_FULL_SCORE = _ACC.speed_full_score
 
 # ── Slice detection ───────────────────────────────────────────────────────────
-SLICE_EXTRA_STD  = 8     # extra px added to fruit radius for hit-zone
-SLICE_EXTRA_ACC  = 50    # Astra: very forgiving hit-zone
+SLICE_EXTRA_STD  = _STD.slice_extra_px
+SLICE_EXTRA_ACC  = _ACC.slice_extra_px
 
 # ── Colours ───────────────────────────────────────────────────────────────────
-BG       = (15, 10, 35)
+BG       = (8, 5, 20)
 TEXT_CLR = (255, 255, 255)
 DIM_CLR  = (160, 160, 180)
 
-# ── Fruit definitions ─────────────────────────────────────────────────────────
-# Each entry: (name, base_radius)
-FRUIT_LIST = [
-    ("apple",      44),
-    ("watermelon", 54),
-    ("orange",     42),
-    ("banana",     40),
-    ("strawberry", 37),
-    ("lemon",      38),
-    ("pomegranate",40),
-]
-FRUIT_NAMES   = [d[0] for d in FRUIT_LIST]
-FRUIT_RADII   = {d[0]: d[1] for d in FRUIT_LIST}
-BOMB_R        = 38
+# ── Fruit definitions (from shared asset catalog) ─────────────────────────────
+# Base pixel radius at 800×600; will be scaled by sc at runtime
+_BASE_RADIUS = 46   # default sprite hit-radius base
+FRUIT_NAMES  = [f["id"] for f in FRUIT_CATALOG]
+FRUIT_RADII  = {f["id"]: int(_BASE_RADIUS * f["radius_frac"] / 0.40) for f in FRUIT_CATALOG}
+JUICE_COLORS = {f["id"]: f["juice_color"] for f in FRUIT_CATALOG}
+FRUIT_POINTS = {f["id"]: f["points"] for f in FRUIT_CATALOG}
+BOMB_R       = 38
+
+# ── Sprite size at 800×600 baseline ──────────────────────────────────────────
+SPRITE_BASE_PX = 92   # sprite render size in pixels at sc=1
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -492,12 +497,13 @@ class FruitNinjaGame:
         if self._learner is not None:
             return
         try:
-            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            from shared.gesture_engine import GestureEngineManager
+            from shared.gesture_learner import SKLEARN_AVAILABLE
             if not SKLEARN_AVAILABLE:
                 self._sklearn_missing = True
                 print("[fruit_ninja] scikit-learn not installed — learn/test mode unavailable.")
                 return
-            self._learner = GestureLearningSystem(username=self._username)
+            self._learner = GestureEngineManager(username=self._username)
             self._sklearn_missing = False
         except ImportError as exc:
             self._sklearn_missing = True
@@ -535,9 +541,9 @@ class FruitNinjaGame:
         self._gyro_px_x_acc = GYRO_SCALE_X_ACC * self._W / 800
         self._gyro_px_y_acc = GYRO_SCALE_Y_ACC * self._H / 600
 
-        self._font_lg = pygame.font.SysFont("monospace", max(24, int(48 * sc)), bold=True)
-        self._font_md = pygame.font.SysFont("monospace", max(12, int(24 * sc)), bold=True)
-        self._font_sm = pygame.font.SysFont("monospace", max( 8, int(14 * sc)))
+        self._font_lg = pygame.font.SysFont("Arial", max(24, int(48 * sc)), bold=True)
+        self._font_md = pygame.font.SysFont("Arial", max(12, int(24 * sc)), bold=True)
+        self._font_sm = pygame.font.SysFont("Arial", max( 8, int(14 * sc)))
         _surf_cache.clear()
 
     def _toggle_fullscreen(self) -> None:
@@ -553,6 +559,20 @@ class FruitNinjaGame:
 
     def run(self, gesture_src) -> str:
         self._gesture_src = gesture_src
+        
+        # Game Goals
+        self._goal = GameGoalsPrompt(self._screen, self._clock).run()
+        self._goal.start()
+        
+        # Sensor & Effects
+        self._sensor     = getattr(gesture_src, "sensor", None)
+        self._inactivity = InactivityMonitor(self._username, self._sensor, self._audio)
+        self._effects    = VisualEffects(self._sensor)
+        self._nebula     = NebulaBg()
+        self._katana     = KatanaTrail()
+        self._juice      = JuiceSplatter()
+        self._combo_fx   = ComboFlash()
+        
         self._reset()
         pygame.mouse.set_visible(False)
         if self._audio:
@@ -567,6 +587,33 @@ class FruitNinjaGame:
                 if self._audio:
                     self._audio.stop_background()
                 return result
+                
+            if self._audio:
+                self._audio.update()
+                
+            # Update Inactivity
+            gs = self._gesture_src.get_state() if self._gesture_src else None
+            is_moving = self._moving
+            if gs is not None and self._paused:
+                # If paused, _update_blade isn't running, so we check for motion directly
+                gyro_mag = math.hypot(gs.abs_gz, gs.abs_gy)
+                visible_thresh = 8.0 # GYRO_VISIBLE_ACC
+                is_moving = (gyro_mag >= visible_thresh) or gs.launch
+
+            is_manually_paused = self._paused and not self._inactivity.is_paused
+            
+            action = self._inactivity.update(is_moving, is_manually_paused)
+            if action == "PAUSE":
+                self._paused = True
+                self._effects.trigger_pause()
+                if self._audio:
+                    self._audio.pause_background()
+            elif action == "RESUME":
+                self._paused = False
+                self._effects.trigger_resume()
+                if self._audio:
+                    self._audio.resume_background()
+                
             if not self._paused and not self._game_over:
                 self._update(dt)
             self._draw()
@@ -575,6 +622,9 @@ class FruitNinjaGame:
     # ── State ─────────────────────────────────────────────────────────────────
 
     def _reset(self) -> None:
+        if hasattr(self, '_goal'):
+            self._goal.start()
+            
         self._score     = 0
         self._lives     = LIVES_START
         self._paused    = False
@@ -589,6 +639,9 @@ class FruitNinjaGame:
         self._last_move_ms = 0   # ticks of last meaningful movement
         self._blade_av = 0.0     # angular velocity magnitude (for trail effects)
         self._last_combo = 0     # combo count (cached for HUD)
+        self._actual_dx = 0.0
+        self._actual_dy = 0.0
+        self._actual_mag = 0.0
 
         # Trail: list of (x, y, ticks_ms)
         self._trail: List[Tuple[float, float, int]] = []
@@ -610,7 +663,7 @@ class FruitNinjaGame:
     def _handle_events(self) -> Optional[str]:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit(); sys.exit(0)
+                return "quit"
             elif event.type == pygame.KEYDOWN:
                 r = self._on_key(event.key)
                 if r:
@@ -622,6 +675,11 @@ class FruitNinjaGame:
             if self._game_over:
                 return "home"
             self._paused = not self._paused
+            if self._audio:
+                if self._paused:
+                    self._audio.pause_background()
+                else:
+                    self._audio.resume_background()
         elif key == pygame.K_x and self._paused:
             return "home"
         elif key == pygame.K_r and self._game_over:
@@ -632,6 +690,10 @@ class FruitNinjaGame:
             self._switch_submode("learn")
         elif key == pygame.K_t:
             self._switch_submode("test")
+        elif key == pygame.K_m:
+            if self._learner is not None:
+                engine_name = self._learner.toggle_engine()
+                print(f"[fruit_ninja] Switched to ML Engine: {engine_name}")
         elif key == pygame.K_v and self._game_submode == "test":
             if self._learner is not None:
                 if not self._show_validation:
@@ -658,14 +720,16 @@ class FruitNinjaGame:
             self._learner.update(gs)
 
         self._update_blade(dt, gs)
+        
+        # Effects update
+        self._effects.update(dt)
 
-        if self._mode == "accessible":
-            self._timer -= dt
-            if self._timer <= 0:
-                self._timer = 0.0
-                self._game_over = True
-                self._stars = (3 if self._score >= STAR_3 else
-                               2 if self._score >= STAR_2 else 1)
+        if not self._game_over and self._goal.check_met(self._score):
+            self._game_over = True
+            self._stars = 3 # Can base on score if we want, but they reached goal!
+            self._effects.trigger_fireworks(self._W//2, self._H//2)
+            if self._audio:
+                self._audio.play_success(self._username)
 
         self._update_spawn(dt)
         self._update_fruits(dt)
@@ -724,6 +788,8 @@ class FruitNinjaGame:
             px_y = self._gyro_px_y_acc if self._mode == "accessible" else self._gyro_px_y
 
             # Test mode: ML model predicts direction; normal: raw gyro integration
+            old_blade_x, old_blade_y = self._blade_x, self._blade_y
+            
             if self._game_submode == "test" and self._learner is not None:
                 tdx, tdy = self._learner.get_cursor_delta(gs, px_x, px_y, dt)
                 self._blade_x += tdx
@@ -731,6 +797,14 @@ class FruitNinjaGame:
             else:
                 self._blade_x += -gz * px_x * dt   # invert: yaw left → cursor left
                 self._blade_y += gy  * px_y * dt   # invert: raise hand → cursor up
+
+            actual_dx = self._blade_x - old_blade_x
+            actual_dy = self._blade_y - old_blade_y
+            actual_mag = math.hypot(actual_dx, actual_dy)
+            
+            self._actual_dx = actual_dx
+            self._actual_dy = actual_dy
+            self._actual_mag = actual_mag
 
             gyro_mag       = math.hypot(gz, gy)
             visible_thresh = GYRO_VISIBLE_ACC if self._mode == "accessible" else GYRO_VISIBLE
@@ -742,7 +816,7 @@ class FruitNinjaGame:
 
             # Astra auto-aim: when moving, pull blade toward nearest fruit
             # Pull is proportional to distance so it feels assistive, not jarring
-            if self._mode == "accessible" and self._moving and self._fruits:
+            if self._mode == "accessible" and self._moving and self._fruits and actual_mag > 0.1:
                 nearest = min(
                     self._fruits,
                     key=lambda f: math.hypot(f.x - self._blade_x, f.y - self._blade_y),
@@ -751,11 +825,14 @@ class FruitNinjaGame:
                 dy = nearest.y - self._blade_y
                 d  = math.hypot(dx, dy)
                 if d > 1.0:
-                    # Stronger pull when fruit is further away, gentler when close
-                    pull_frac = min(1.0, d / (self._W * 0.3))
-                    pull = AUTO_AIM_PULL * pull_frac * self._sc * dt
-                    self._blade_x += dx / d * pull
-                    self._blade_y += dy / d * pull
+                    # Intent check: only pull if moving roughly towards the fruit (dot product > 0.3)
+                    dot = (actual_dx * dx + actual_dy * dy) / (actual_mag * d)
+                    if dot > 0.3:
+                        # Stronger pull when fruit is further away, gentler when close
+                        pull_frac = min(1.0, d / (self._W * 0.3))
+                        pull = AUTO_AIM_PULL * pull_frac * self._sc * dt
+                        self._blade_x += dx / d * pull
+                        self._blade_y += dy / d * pull
         else:
             self._moving = False
 
@@ -827,8 +904,9 @@ class FruitNinjaGame:
             fruit = Fruit(x=x, y=y, vx=vx, vy=vy, kind="bomb", r=r,
                           hazard=True, rot_spd=random.uniform(-3.5, 3.5))
         else:
-            name = random.choice(FRUIT_NAMES)
-            r    = int(FRUIT_RADII[name] * sc)
+            entry = random.choice(FRUIT_CATALOG)
+            name  = entry["id"]
+            r     = int(FRUIT_RADII[name] * sc)
             fruit = Fruit(x=x, y=y, vx=vx, vy=vy, kind=name, r=r,
                           rot_spd=random.uniform(-2.5, 2.5))
         self._fruits.append(fruit)
@@ -850,7 +928,7 @@ class FruitNinjaGame:
         self._fruits = [f for f in self._fruits if f.alive]
 
     def _on_miss(self) -> None:
-        if self._mode != "accessible":
+        if self._mode != "accessible" and self._goal.target_score != 10000:
             self._lives -= 1
             self._miss_flash = 0.45
             if self._lives <= 0:
@@ -890,30 +968,60 @@ class FruitNinjaGame:
             self._miss_flash = 0.6
             self._score_floats.append(ScoreFloat(
                 x=fruit.x, y=fruit.y, text="BOMB!", color=(255, 80, 40)))
-            if self._mode != "accessible":
+            if self._mode != "accessible" and self._goal.target_score != 10000:
                 self._lives -= 1
                 if self._lives <= 0:
                     self._game_over = True
                     self._stars = 0
         else:
-            # Combo multiplier: 1x (no combo), 2x (1-2 combo), 3x (3+)
-            combo = self._last_combo
-            multiplier = min(3, 1 + combo // 2)
-            points = multiplier
+            if self._mode == "accessible":
+                # Astra mode dynamic bonus based on intentionality toward the fruit
+                if self._actual_mag > 0.1:
+                    # Vector from previous position to fruit
+                    fx_dir = fruit.x - (self._blade_x - self._actual_dx)
+                    fy_dir = fruit.y - (self._blade_y - self._actual_dy)
+                    f_dist = math.hypot(fx_dir, fy_dir)
+                    if f_dist > 0:
+                        dot = (self._actual_dx * fx_dir + self._actual_dy * fy_dir) / (self._actual_mag * f_dist)
+                        if dot > 0.7:
+                            multiplier = 3
+                        elif dot > 0.3:
+                            multiplier = 2
+                        else:
+                            multiplier = 1
+                    else:
+                        multiplier = 1
+                else:
+                    multiplier = 1
+                combo = 0 # No combo HUD logic needed in Astra
+            else:
+                # Combo multiplier: 1x (no combo), 2x (1-2 combo), 3x (3+)
+                combo      = self._last_combo
+                multiplier = min(3, 1 + combo // 2)
+                
+            base_pts   = FRUIT_POINTS.get(fruit.kind, 10)
+            points     = base_pts * multiplier
             self._score += points
 
             if self._audio:
                 self._audio.play_collect()
             self._spawn_halves(fruit)
             clr = JUICE_COLORS.get(fruit.kind, (200, 200, 200))
-            self._spawn_juice(fruit.x, fruit.y, clr, fruit.r)
+            # Enhanced juice splatter via JuiceSplatter
+            self._juice.spawn(fruit.x, fruit.y, clr, n=28)
+            self._spawn_juice(fruit.x, fruit.y, clr, fruit.r)  # keep original smaller burst too
+            self._effects.trigger_point_gain(fruit.x, fruit.y)
+
+            # Combo flash effect
+            if combo >= 1:
+                self._combo_fx.trigger(fruit.x, fruit.y, combo + 1)
 
             # Score float with combo indicator
             if combo > 1:
-                score_text = f"+{points} x{multiplier}!"
-                float_color = (255, 220, 60)  # golden for combo
+                score_text  = f"+{points} x{multiplier}!"
+                float_color = (255, 220, 60)
             else:
-                score_text = f"+{points}"
+                score_text  = f"+{points}"
                 float_color = (255, 255, 255)
 
             self._score_floats.append(ScoreFloat(
@@ -995,12 +1103,16 @@ class FruitNinjaGame:
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def _draw(self) -> None:
-        self._screen.fill(BG)
-        self._draw_bg()
+        # Animated nebula background
+        self._nebula.update(self._clock.get_time() / 1000.0)
+        self._nebula.draw(self._screen)
         self._draw_halves()
         self._draw_fruits()
         self._draw_particles()
+        self._juice.draw(self._screen)
         self._draw_trail()
+        self._combo_fx.draw(self._screen)
+        self._effects.draw(self._screen)
         self._draw_score_floats()
         self._draw_hud()
         if self._miss_flash > 0:
@@ -1009,82 +1121,88 @@ class FruitNinjaGame:
             self._draw_debug()
         if self._paused:
             self._draw_overlay("PAUSED", "ESC to resume   X to menu")
+        self._inactivity.draw(self._screen)
         if self._game_over:
             self._draw_game_over()
         if self._show_validation and self._game_submode == "test":
             self._draw_validation_panel()
 
     def _draw_bg(self) -> None:
-        surf = pygame.Surface((self._W, self._H), pygame.SRCALPHA)
-        cx   = self._W // 2
-        base = self._H + int(40 * self._sc)
-        for i in range(5, 0, -1):
-            pygame.draw.circle(surf, (28, 16, 55, i * 4),
-                               (cx, base), int(self._H * 0.62 * i / 3))
-        self._screen.blit(surf, (0, 0))
+        pass  # replaced by NebulaBg in _draw()
 
     def _draw_fruits(self) -> None:
         for f in self._fruits:
-            s = _fruit_surf(f.kind, f.r, 255)
-            # Rotate
+            sprite_px = int(SPRITE_BASE_PX * self._sc)
+            if f.kind == "bomb":
+                s = load_sprite("bomb.jpg", sprite_px)
+            else:
+                entry = next((e for e in FRUIT_CATALOG if e["id"] == f.kind), None)
+                asset = entry["asset"] if entry else "fruit_strawberry.jpg"
+                s = load_sprite(asset, sprite_px)
             rs = pygame.transform.rotate(s, math.degrees(f.rot))
             self._screen.blit(rs, rs.get_rect(center=(int(f.x), int(f.y))))
 
     def _draw_halves(self) -> None:
         for h in self._halves:
-            s = _fruit_half_surf(h.kind, h.r, h.flip, h.alpha)
-            rs = pygame.transform.rotate(s, math.degrees(h.angle))
+            sprite_px = int(SPRITE_BASE_PX * self._sc)
+            if h.kind == "bomb":
+                s = load_sprite("bomb.jpg", sprite_px)
+            else:
+                entry = next((e for e in FRUIT_CATALOG if e["id"] == h.kind), None)
+                # Use the slice (interior face) asset for halves — reveals juicy inside
+                asset = entry["slice_asset"] if entry and "slice_asset" in entry else (
+                    entry["asset"] if entry else "fruit_strawberry_slice.jpg"
+                )
+                s = load_sprite(asset, sprite_px)
+            # Clip left or right half of the slice sprite
+            half_w = sprite_px // 2
+            clip_rect = pygame.Rect(0 if not h.flip else half_w, 0, half_w, sprite_px)
+            half_surf = s.subsurface(clip_rect)
+            # Removed expensive .copy() and .set_alpha(h.alpha) which causes massive CPU lag 
+            # when used on per-pixel alpha surfaces.
+            rs = pygame.transform.rotate(half_surf, math.degrees(h.angle))
             self._screen.blit(rs, rs.get_rect(center=(int(h.x), int(h.y))))
 
     def _draw_particles(self) -> None:
         for p in self._particles:
-            a = max(0, int(255 * p.life / p.max_life))
-            if a == 0:
+            if p.life <= 0:
                 continue
-            s = pygame.Surface((p.r * 2, p.r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(s, (*p.color, a), (p.r, p.r), p.r)
-            self._screen.blit(s, (int(p.x) - p.r, int(p.y) - p.r))
+            # Optimize: avoid creating transparent surfaces every frame
+            # Shrink radius instead of fading alpha
+            frac = p.life / p.max_life
+            r = max(1, int(p.r * frac))
+            pygame.draw.circle(self._screen, p.color, (int(p.x), int(p.y)), r)
 
     def _draw_trail(self) -> None:
-        """Draw glowing blade trail — only visible while moving."""
-        now_ms = pygame.time.get_ticks()
-        pts    = self._trail[-24:]
-        if len(pts) < 2:
+        """Draw a simple cartoon katana following the cursor (no expensive trail mesh)."""
+        pts = self._trail[-24:]
+        if not pts:
             return
-
-        # Compute AV boost for enhanced visual effects when swinging fast
-        av = self._blade_av
-        dead = GYRO_DEAD_ACC if self._mode == "accessible" else GYRO_DEAD
-        slice_thresh = GYRO_SLICE_ACC if self._mode == "accessible" else GYRO_SLICE
-        av_boost = min(1.0, max(0.0, (av - slice_thresh) / (300.0 - slice_thresh)))
-
-        for i in range(1, len(pts)):
-            x0, y0, t0 = pts[i - 1]
-            x1, y1, t1 = pts[i]
-            age  = (now_ms - t1) / CURSOR_HIDE_MS
-            fade = max(0.0, 1.0 - age)
-            if fade <= 0:
-                continue
-            # Width scales with AV: base 4px + up to 2px when swinging hard
-            w = max(1, int((4.0 - age * 3.5 + av_boost * 2.0) * self._sc))
-            c = int(230 * fade)
-            # Color lerps toward bright white when swinging fast
-            r_ch = int(c + (255 - c) * av_boost * 0.7)
-            g_ch = int(int(c * 0.82) + 20 + (255 - (int(c * 0.82) + 20)) * av_boost * 0.7)
-            b_ch = 255
-            pygame.draw.line(self._screen,
-                             (r_ch, g_ch, b_ch),
-                             (int(x0), int(y0)), (int(x1), int(y1)), w)
-        # Tip glow
-        x, y, _ = pts[-1]
-        age = (now_ms - pts[-1][2]) / CURSOR_HIDE_MS
-        if age < 0.4:
-            fade = 1.0 - age / 0.4
-            gr   = max(2, int(7 * self._sc * fade))
-            gs   = pygame.Surface((gr * 2 + 4, gr * 2 + 4), pygame.SRCALPHA)
-            a    = int(180 * fade)
-            pygame.draw.circle(gs, (200, 230, 255, a), (gr + 2, gr + 2), gr)
-            self._screen.blit(gs, (int(x) - gr - 2, int(y) - gr - 2))
+            
+        # Draw the juice splatters behind the sword
+        self._juice.update(self._clock.get_time() / 1000.0)
+        
+        # Render the simple katana blade sprite at the head
+        if len(pts) >= 2:
+            p1 = pts[-2]
+            p2 = pts[-1]
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            angle = math.degrees(math.atan2(-dy, dx)) # -dy because pygame y goes down
+            
+            # Load and rotate katana sprite
+            blade_px = int(120 * self._sc)
+            katana_surf = load_sprite("blade_katana.jpg", blade_px)
+            
+            # The new simple sword asset has its tip pointing right (0 degrees) and handle left.
+            # Rotating by exactly `angle` aligns the tip with the movement direction,
+            # keeping the handle at the bottom when swinging upwards.
+            # Added 45 degrees anti-clockwise rotation per user request to keep edge upward.
+            rotated_katana = pygame.transform.rotate(katana_surf, angle + 45)
+            rect = rotated_katana.get_rect(center=(int(p2[0]), int(p2[1])))
+            self._screen.blit(rotated_katana, rect)
+        # Combo flash update
+        self._combo_fx.update(self._clock.get_time() / 1000.0)
 
     def _draw_score_floats(self) -> None:
         for sf in self._score_floats:

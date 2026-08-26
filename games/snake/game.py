@@ -132,12 +132,13 @@ class SnakeGame:
         if self._learner is not None:
             return
         try:
-            from shared.gesture_learner import GestureLearningSystem, SKLEARN_AVAILABLE
+            from shared.gesture_engine import GestureEngineManager
+            from shared.gesture_learner import SKLEARN_AVAILABLE
             if not SKLEARN_AVAILABLE:
                 self._sklearn_missing = True
                 print("[snake] scikit-learn not installed — learn/test mode unavailable.")
                 return
-            self._learner = GestureLearningSystem(username=self._username)
+            self._learner = GestureEngineManager(username=self._username)
             self._sklearn_missing = False
         except ImportError as exc:
             self._sklearn_missing = True
@@ -353,8 +354,7 @@ class SnakeGame:
     def _handle_events(self) -> Optional[str]:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit(0)
+                return "quit"
             elif event.type == pygame.KEYDOWN:
                 result = self._on_key(event.key)
                 if result:
@@ -406,6 +406,10 @@ class SnakeGame:
             self._switch_submode("test")
         elif key == pygame.K_r and not self._game_over:
             self._switch_submode("play")
+        elif key == pygame.K_m:
+            if self._learner is not None:
+                engine_name = self._learner.toggle_engine()
+                print(f"[snake] Switched to ML Engine: {engine_name}")
         elif key == pygame.K_v and self._game_submode == "test":
             if self._learner is not None:
                 if not self._show_validation:

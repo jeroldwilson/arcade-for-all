@@ -90,21 +90,11 @@ class CalibrationGame:
         self._fusion_ready: bool = False
         self._fig8_t: float = 0.0    # animation phase for figure-8 guide
 
-        # Pre-Flight Systems Check (BMM150 magnetometer calibration, states 0-3)
-        self._pf_state: int = 0
-        self._pf_prev_state: int = -1   # -1 forces initial stall-timer reset
-        self._pf_stall_timer: float = 10.0
-        self._pf_show_helper: bool = False
-        self._pf_complete: bool = False
-        self._pf_haptic_sent: bool = False
-        self._pf_takeoff_t: float = 0.0   # seconds since takeoff animation started
-        # Keyboard-mode simulation: auto-advance state every ~6 s
-        self._pf_sim_state: int = 0
-        self._pf_sim_timer: float = 6.0
-        # Arc-proxy: total rotation accumulated while doing wide arcs (degrees)
-        # Used when hardware sensor-fusion module isn't running (most setups).
-        # Thresholds: 350° / 800° / 1400° of cumulative rotation → states 1 / 2 / 3
-        self._pf_arc_total: float = 0.0
+        # Pre-Flight Systems Check disabled (IMUPlus mode does not need mag calibration)
+        self._pf_state: int = 3
+        self._pf_complete: bool = True
+        self._pf_takeoff_t: float = 5.0
+        self._pf_haptic_sent: bool = True
 
         self._init_layout()
 
@@ -154,8 +144,7 @@ class CalibrationGame:
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    pygame.quit()
-                    sys.exit(0)
+                    return "quit"
                 if event.type == pygame.KEYDOWN:
                     if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
                         return "home"
@@ -639,64 +628,8 @@ class CalibrationGame:
     # ── Pre-Flight Systems Check ──────────────────────────────────────────────
 
     def _update_pre_flight(self, gs, dt: float, gesture_src) -> None:
-        """State-machine for BMM150 magnetometer calibration progress.
-
-        Priority order for effective_state:
-          1. Real hardware mag_cal_state (BLE sensor-fusion module, 0x19) if > 0
-          2. Arc-proxy: total rotation °, thresholds 350/800/1400 → states 1/2/3
-          3. Timer fallback for keyboard mode (av_magnitude is always 0)
-        """
-        if self._mode == "keyboard":
-            # No sensor — advance on a timer so the demo is still playable
-            self._pf_sim_timer -= dt
-            if self._pf_sim_timer <= 0.0 and self._pf_sim_state < 3:
-                self._pf_sim_state += 1
-                self._pf_sim_timer = 6.0
-            effective_state = self._pf_sim_state
-        elif gs.mag_cal_state > 0:
-            # Hardware sensor-fusion module is responding — use the real value
-            effective_state = gs.mag_cal_state
-        else:
-            # Sensor-fusion module not started or no magnetometer on this variant.
-            # Use cumulative angular velocity as a proxy: the child steering in
-            # wide arcs accumulates degrees and advances through the states.
-            _ARC_THRESHOLDS = (350.0, 800.0, 1400.0)  # °  for states 1, 2, 3
-            self._pf_arc_total += gs.av_magnitude * dt
-            if self._pf_arc_total >= _ARC_THRESHOLDS[2]:
-                effective_state = 3
-            elif self._pf_arc_total >= _ARC_THRESHOLDS[1]:
-                effective_state = 2
-            elif self._pf_arc_total >= _ARC_THRESHOLDS[0]:
-                effective_state = 1
-            else:
-                effective_state = 0
-
-        # Reset stall timer whenever the state advances
-        if effective_state != self._pf_prev_state:
-            self._pf_stall_timer = 10.0
-            self._pf_show_helper = False
-            self._pf_prev_state  = effective_state
-        self._pf_state = effective_state
-
-        if not self._pf_complete:
-            if effective_state < 3:
-                self._pf_stall_timer = max(0.0, self._pf_stall_timer - dt)
-                if self._pf_stall_timer <= 0.0:
-                    self._pf_show_helper = True
-                    self._pf_stall_timer = 10.0  # re-arm so the prompt doesn't flicker
-            else:
-                self._pf_complete = True
-                if not self._pf_haptic_sent:
-                    self._pf_haptic_sent = True
-                    gesture_src.vibrate(0.5)
-                    # Only write to NVM if hardware sensor-fusion provided real cal data
-                    # (gs.mag_cal_state > 0). Sending the NVM write without sensor fusion
-                    # running can reconfigure the gyro and break all subsequent streaming.
-                    if gs.mag_cal_state > 0:
-                        gesture_src.save_calibration_to_nvm()
-
-        if self._pf_complete:
-            self._pf_takeoff_t += dt
+        """Pre-flight checks disabled for IMUPlus mode."""
+        pass
 
     def _draw_signal_gauge(self, cx: int, cy: int, state: int) -> None:
         """
