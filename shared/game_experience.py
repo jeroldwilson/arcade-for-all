@@ -371,10 +371,12 @@ class InactivityMonitor:
                     self.sensor.set_ambient_light(on=False)
                 return "RESUME"
             if self.woke_up:
-                self.woke_up = False
-                self.message = ""
-                if self.sensor:
-                    self.sensor.set_ambient_light(on=False)
+                # Keep the wake up message on screen for at least 10 seconds
+                if now - getattr(self, "wake_up_trigger_time", 0.0) >= 10.0:
+                    self.woke_up = False
+                    self.message = ""
+                    if self.sensor:
+                        self.sensor.set_ambient_light(on=False)
             return None
         inactive_dur = now - self.last_motion_time
         if inactive_dur > self.pause_threshold:
@@ -385,7 +387,9 @@ class InactivityMonitor:
                     self.sensor.set_ambient_light(on=False)
                 return "PAUSE"
         elif inactive_dur > self.inactivity_threshold and not self.is_paused:
-            self.woke_up = True
+            if not self.woke_up:
+                self.woke_up = True
+                self.wake_up_trigger_time = now
             
             # Play encourage audio with 50s cooldown
             if self.audio and (now - self.last_encourage_time > 50.0):
@@ -414,12 +418,63 @@ class InactivityMonitor:
         if not self.message:
             return
         self._ensure_fonts()
-        surf = self._font.render(self.message, True, self.message_color)
-        rect = surf.get_rect(center=(screen.get_width() // 2, screen.get_height() // 2))
-        bg   = pygame.Surface((rect.width + 40, rect.height + 40), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, 180))
-        screen.blit(bg, (rect.x - 20, rect.y - 20))
-        screen.blit(surf, rect)
+
+        # 1. Load mango sprite on demand if we haven't tried yet
+        if not hasattr(self, '_mango_sprite_loaded'):
+            self._mango_sprite_loaded = True
+            import os
+            sprite_path = "assets/images/mango_character.png"
+            if os.path.exists(sprite_path):
+                try:
+                    self.mango_sprite = pygame.image.load(sprite_path).convert_alpha()
+                    # Scale to a standard large size for display
+                    self.mango_sprite = pygame.transform.smoothscale(self.mango_sprite, (220, 220))
+                except Exception as e:
+                    print(f"Error loading mango sprite: {e}")
+                    self.mango_sprite = None
+            else:
+                self.mango_sprite = None
+
+        # 2. Render text message
+        text_surf = self._font.render(self.message, True, self.message_color)
+        text_rect = text_surf.get_rect()
+
+        # 3. Handle animated mango
+        now = time.time()
+        if hasattr(self, 'mango_sprite') and self.mango_sprite is not None:
+            # Waving angle oscillates between -12 and 12 degrees
+            angle = 12.0 * math.sin(now * 6.0)
+            # Breathing scale oscillates between 0.95 and 1.05
+            scale_factor = 1.0 + 0.05 * math.sin(now * 3.0)
+
+            # Perform scaling
+            w, h = self.mango_sprite.get_size()
+            scaled_sprite = pygame.transform.smoothscale(
+                self.mango_sprite, (int(w * scale_factor), int(h * scale_factor))
+            )
+            # Perform rotation
+            rotated_sprite = pygame.transform.rotate(scaled_sprite, angle)
+            sprite_rect = rotated_sprite.get_rect()
+
+            # Center layout
+            cx, cy = screen.get_width() // 2, screen.get_height() // 2
+            spacing = 20
+            total_height = sprite_rect.height + spacing + text_rect.height
+
+            # Positions
+            start_y = cy - total_height // 2
+            sprite_rect.centerx = cx
+            sprite_rect.top = start_y
+
+            text_rect.centerx = cx
+            text_rect.top = sprite_rect.bottom + spacing
+
+            screen.blit(rotated_sprite, sprite_rect)
+            screen.blit(text_surf, text_rect)
+        else:
+            # Fallback to text-only layout if no mango sprite
+            rect = text_surf.get_rect(center=(screen.get_width() // 2, screen.get_height() // 2))
+            screen.blit(text_surf, rect)
 
 
 # ── GameGoal / GameGoalsPrompt ────────────────────────────────────────────────
