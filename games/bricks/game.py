@@ -224,7 +224,7 @@ class BricksGame:
         self._guided = GuidedLearnFlow(("right", "left"), per_direction_target=8)
         self._mode_toast: float = 0.0
         self._mode_toast_msg: str = ""
-        if game_submode in ("learn", "test"):
+        if game_submode in ("learn", "test") or self._mode == "accessible":
             self._init_learner()
         if game_submode == "test" and self._learner is not None:
             self._learner.start_validation()
@@ -553,7 +553,11 @@ class BricksGame:
             self._paddle.centerx = mx
             self._prev_mouse_x = mx
         elif self._mode == "accessible" and self._game_submode != "test":
-            self._update_paddle_intent(dt, gs)
+            if self._learner is not None and self._learner.model_ready:
+                direction, confidence = self._learner.predict(gs)
+                self._update_paddle_intent_ml(dt, gs, direction, confidence)
+            else:
+                self._update_paddle_intent(dt, gs)
         else:
             velocity = gs.paddle_velocity if gs else 0.0
             if self._game_submode == "test" and self._learner is not None and gs is not None:
@@ -585,6 +589,37 @@ class BricksGame:
         downward = [b for b in candidates if b.vy > 0]
         pool = downward if downward else candidates
         return max(pool, key=lambda b: b.y)
+
+    def _update_paddle_intent_ml(self, dt: float, gs, direction: Optional[str], confidence: float) -> None:
+        """ML-driven accessible mode. >0.8 = direct control, 0.4-0.8 = assist, <0.4 = ignore."""
+        if direction is None or confidence < 0.4:
+            return
+
+        # >0.8: direct execution
+        if confidence >= 0.8:
+            if direction == "left":
+                self._paddle.x -= int(self._paddle_spd * dt)
+            elif direction == "right":
+                self._paddle.x += int(self._paddle_spd * dt)
+        else:
+            # Assist mode (0.4-0.8): if paddle is near the ball, snap to it, otherwise move in direction
+            ball = self._pick_target_ball()
+            if ball is not None and ball.vy > 0:
+                # Snap to ball if within magnetic distance (e.g., 2 paddle widths)
+                dist = abs(ball.x - self._paddle.centerx)
+                if dist < self._paddle.width * 2.0:
+                    target_left = int(ball.x - 0.5 * self._paddle.width)
+                    dx = target_left - self._paddle.x
+                    if abs(dx) >= 1:
+                        step = min(abs(dx), max(1, int(self._paddle_spd * dt)))
+                        self._paddle.x += int(math.copysign(step, dx))
+                    return
+            
+            # Normal movement if far from ball or ball not falling
+            if direction == "left":
+                self._paddle.x -= int(self._paddle_spd * dt)
+            elif direction == "right":
+                self._paddle.x += int(self._paddle_spd * dt)
 
     def _update_paddle_intent(self, dt: float, gs) -> None:
         """Accessible: drift randomly when ball rises; aim at random paddle spot when falling."""

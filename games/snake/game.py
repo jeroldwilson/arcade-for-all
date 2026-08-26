@@ -121,7 +121,7 @@ class SnakeGame:
         self._gesture_src = None
         self._mode_toast: float = 0.0
         self._mode_toast_msg: str = ""
-        if game_submode in ("learn", "test"):
+        if game_submode in ("learn", "test") or self._mode == "accessible":
             self._init_learner()
         if game_submode == "test" and self._learner is not None:
             self._learner.start_validation()
@@ -324,7 +324,11 @@ class SnakeGame:
             tilt_y = 1    # back tilt → DOWN
 
         if self._mode == "accessible":
-            self._read_gesture_accessible(tilt_x, tilt_y)
+            if self._learner is not None and self._learner.model_ready:
+                direction, confidence = self._learner.predict(gs)
+                self._read_gesture_accessible_ml(direction, confidence)
+            else:
+                self._read_gesture_accessible(tilt_x, tilt_y)
         else:
             self._read_gesture_standard(tilt_x, tilt_y)
 
@@ -337,8 +341,45 @@ class SnakeGame:
             self._apply_direction(Dir.UP if tilt_y < 0 else Dir.DOWN)
         self._last_tilt_y = tilt_y
 
+    def _read_gesture_accessible_ml(self, direction: Optional[str], confidence: float) -> None:
+        """ML-driven accessible mode. >0.8 = direct control, 0.4-0.8 = assist, <0.4 = ignore."""
+        now = time.monotonic()
+        
+        if direction is None or confidence < 0.4:
+            return
+            
+        if now < self._cd_x_until:
+            return
+            
+        # Map ML direction string to Dir enum
+        dir_map = {
+            "up": Dir.UP,
+            "down": Dir.DOWN,
+            "left": Dir.LEFT,
+            "right": Dir.RIGHT
+        }
+        
+        target_dir = dir_map.get(direction)
+        if target_dir is None:
+            return
+            
+        # >0.8: direct execution. 0.4-0.8: heavy assistance
+        if confidence >= 0.8:
+            self._apply_direction(target_dir)
+        else:
+            # Assist: only apply if it brings us closer to food
+            best_dir = self._best_dir_toward_food()
+            # If the best direction is on the same axis as their intent, assist them
+            if (target_dir in (Dir.UP, Dir.DOWN) and best_dir in (Dir.UP, Dir.DOWN)) or \
+               (target_dir in (Dir.LEFT, Dir.RIGHT) and best_dir in (Dir.LEFT, Dir.RIGHT)):
+                self._apply_direction(best_dir)
+            else:
+                self._apply_direction(target_dir)
+                
+        self._cd_x_until = now + (ACCESSIBLE_GESTURE_CD / 2.0)
+
     def _read_gesture_accessible(self, tilt_x: int, tilt_y: int) -> None:
-        """Intent-assist: any gesture triggers the optimal turn toward food."""
+        """Fallback intent-assist when ML not available."""
         now = time.monotonic()
 
         if tilt_x != 0 and tilt_x != self._last_tilt_x:
@@ -551,7 +592,21 @@ class SnakeGame:
         self._direction = self._next_dir
 
         if self._mode == "accessible":
-            # Wrap around walls (toroidal grid)
+            # Wall collision failsafe auto-turn for accessible mode
+            if not (0 <= new_head[0] < COLS and 0 <= new_head[1] < ROWS):
+                # We are about to hit a wall, auto-turn away
+                safe_dirs = [d for d in Dir if d != self._direction.opposite()]
+                # Find a direction that doesn't hit a wall
+                for d in safe_dirs:
+                    dx2, dy2 = d.value
+                    test_head = (head[0] + dx2, head[1] + dy2)
+                    if (0 <= test_head[0] < COLS and 0 <= test_head[1] < ROWS):
+                        self._direction = d
+                        self._next_dir = d
+                        new_head = test_head
+                        break
+            
+            # Wrap around walls (toroidal grid) if failsafe didn't catch it
             new_head = (new_head[0] % COLS, new_head[1] % ROWS)
             # No self-collision death — just pass through
         else:

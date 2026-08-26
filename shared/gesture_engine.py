@@ -40,6 +40,9 @@ class GestureEngineManager:
     def try_record(self, gs, blade_xy: Tuple[float, float], fruits_xy: List[Tuple[float, float]], mode: str = "standard") -> bool:
         return self.current_engine.try_record(gs, blade_xy, fruits_xy, mode)
         
+    def predict(self, gs) -> Tuple[Optional[str], float]:
+        return self.current_engine.predict(gs)
+        
     def get_cursor_delta(self, gs, scale_x: float, scale_y: float, dt: float) -> Tuple[float, float]:
         return self.current_engine.get_cursor_delta(gs, scale_x, scale_y, dt)
         

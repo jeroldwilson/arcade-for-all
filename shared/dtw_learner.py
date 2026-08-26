@@ -424,6 +424,58 @@ class DTWLearningSystem:
         self._last_rec_flash = now
         return True
         
+    def predict(self, gs) -> Tuple[Optional[str], float]:
+        gyro_mag = math.sqrt(gs.abs_gx**2 + gs.abs_gy**2 + gs.abs_gz**2)
+        
+        if gyro_mag < self._profile.dead_zone:
+            self._pred_history.clear()
+            return None, 0.0
+            
+        if not self.model.ready:
+            return None, 0.0
+            
+        window = self.buffer.snapshot()
+        if len(window) < 10:
+            return None, 0.0
+            
+        curve = self.extractor.extract(window)
+        
+        # Run Auto-segmentation against all templates
+        matches = []
+        for class_label, template in self.model.templates.items():
+            dist, start_idx, end_idx = DTWEngine.auto_segment(curve, template)
+            threshold = self.model.mmh_thresholds.get(class_label, 1000.0)
+            
+            if dist < threshold:
+                matches.append((class_label, dist))
+                
+        if not matches:
+            return None, 0.0
+            
+        matches.sort(key=lambda x: x[1])
+        candidates = [m[0] for m in matches if m[1] < matches[0][1] * 1.5]
+        
+        from shared.dtw_learner import SecondStageClassifier
+        final_dir = SecondStageClassifier.resolve_direction(window, candidates)
+        
+        self._pred_history.append(final_dir)
+        counts = {}
+        for p in self._pred_history: counts[p] = counts.get(p, 0) + 1
+        best_dir = max(counts, key=lambda d: counts[d])
+        majority_frac = counts[best_dir] / len(self._pred_history)
+        
+        # Convert DTW distance back to a pseudo-confidence (0.0 to 1.0)
+        # Distance is typically between 0 and threshold.
+        # So confidence = 1.0 - (dist / threshold)
+        best_dist = matches[0][1]
+        threshold = self.model.mmh_thresholds.get(best_dir, 1000.0)
+        confidence = max(0.0, 1.0 - (best_dist / max(1.0, threshold)))
+        
+        if majority_frac < 0.6:
+            return None, confidence
+            
+        return best_dir, confidence
+
     def get_cursor_delta(self, gs, scale_x: float, scale_y: float, dt: float) -> Tuple[float, float]:
         gyro_mag = math.sqrt(gs.abs_gx**2 + gs.abs_gy**2 + gs.abs_gz**2)
         gz = gs.abs_gz if abs(gs.abs_gz) >= self._profile.dead_zone else 0.0

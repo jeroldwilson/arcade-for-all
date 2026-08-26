@@ -272,11 +272,13 @@ def main() -> None:
     from games.bricks.game      import BricksGame
     from games.snake.game       import SnakeGame
     from games.fruit_ninja.game import FruitNinjaGame
+    from games.scratch_pad.game import ScratchPadGame
 
     GAME_REGISTRY = {
         "bricks":      BricksGame,
         "snake":       SnakeGame,
         "fruit_ninja": FruitNinjaGame,
+        "scratch_pad": ScratchPadGame,
     }
 
     debug = args.debug   # tracks D-key toggles across home ↔ game transitions

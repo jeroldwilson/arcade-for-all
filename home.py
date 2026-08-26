@@ -37,7 +37,7 @@ DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
-GAMES = ["bricks", "snake", "fruit_ninja"]   # calibration & magic_wand added dynamically
+GAMES = ["bricks", "snake", "fruit_ninja", "scratch_pad"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
     "fruit_ninja": {
@@ -69,6 +69,12 @@ GAME_META = {
         "desc":    ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
         "desc_ac": ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
         "accent":  (255, 170, 50),
+    },
+    "scratch_pad": {
+        "title":   "SCRATCH PAD",
+        "desc":    ["Draw with your sensor!", "Flick to toggle pen.", "Test ML gesture models."],
+        "desc_ac": ["Draw with your sensor!", "Flick to toggle pen.", "Test ML gesture models."],
+        "accent":  (200, 150, 255),
     },
 }
 
@@ -493,8 +499,29 @@ class HomeScreen:
             self._draw_snake_preview(area, dim)
         elif game_id == "fruit_ninja":
             self._draw_fruit_ninja_preview(area, dim)
+        elif game_id == "scratch_pad":
+            self._draw_scratch_pad_preview(area, dim)
 
         self._screen.set_clip(prev_clip)
+
+    def _draw_scratch_pad_preview(self, area: pygame.Rect, dim: int) -> None:
+        sc = self._sc
+        alpha = dim
+        cx = area.centerx
+        cy = area.centery
+        t = pygame.time.get_ticks() / 1000.0
+        r = int(15 * sc)
+        x = cx + int(math.cos(t * 2) * r)
+        y = cy + int(math.sin(t * 3) * r)
+        
+        # draw a simple squiggle line
+        pts = []
+        for i in range(20):
+            pt_t = t - (i * 0.05)
+            pts.append((cx + int(math.cos(pt_t * 2) * r), cy + int(math.sin(pt_t * 3) * r)))
+            
+        pygame.draw.lines(self._screen, (min(255, 150*alpha//255), min(255, 100*alpha//255), min(255, 255*alpha//255)), False, pts, int(3 * sc))
+        pygame.draw.circle(self._screen, (min(255, 200*alpha//255), min(255, 150*alpha//255), min(255, 255*alpha//255)), (x, y), int(5 * sc))
 
     def _draw_bricks_preview(self, area: pygame.Rect, dim: int) -> None:
         sc = self._sc

@@ -22,6 +22,7 @@ Modes
 import math
 import random
 import sys
+from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
@@ -676,6 +677,10 @@ class FruitNinjaGame:
         self._score_floats: List[ScoreFloat] = []
         self._miss_flash   = 0.0
         self._spawn_cd     = 0.6
+        
+        # Low-pass filter for Accessible mode tremors
+        self._acc_gz_history: deque = deque(maxlen=6)
+        self._acc_gy_history: deque = deque(maxlen=6)
 
     # ── Events ────────────────────────────────────────────────────────────────
 
@@ -801,6 +806,14 @@ class FruitNinjaGame:
 
             # Astra uses a smaller dead-zone so tiny movements still register
             dead = GYRO_DEAD_ACC if self._mode == "accessible" else GYRO_DEAD
+            
+            # Low-pass filter for Accessible mode tremors
+            if self._mode == "accessible":
+                self._acc_gz_history.append(gz)
+                self._acc_gy_history.append(gy)
+                gz = sum(self._acc_gz_history) / len(self._acc_gz_history)
+                gy = sum(self._acc_gy_history) / len(self._acc_gy_history)
+                
             if abs(gz) < dead:
                 gz = 0.0
             if abs(gy) < dead:

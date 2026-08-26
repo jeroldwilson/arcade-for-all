@@ -865,6 +865,43 @@ class GestureLearningSystem:
             self._last_rec_flash = time.monotonic()
         return recorded
 
+    def predict(self, gs) -> Tuple[Optional[str], float]:
+        """
+        Returns the temporally smoothed predicted direction and its confidence score.
+        Returns (None, confidence) if there's no clear prediction or confidence is too low.
+        """
+        profile = self._profile
+        gyro_mag = math.sqrt(gs.abs_gx**2 + gs.abs_gy**2 + gs.abs_gz**2)
+
+        if gyro_mag < profile.dead_zone:
+            self._pred_history.clear()
+            return None, 0.0
+
+        if not self.model.ready:
+            return None, 0.0
+
+        window = self.buffer.snapshot()
+        features = self.extractor.extract(window)
+        if features is None:
+            return None, 0.0
+
+        direction, confidence = self.model.predict_with_confidence(features)
+
+        if direction is None:
+            return None, confidence
+
+        self._pred_history.append(direction)
+        counts: Dict[str, int] = {}
+        for p in self._pred_history:
+            counts[p] = counts.get(p, 0) + 1
+        best_dir = max(counts, key=lambda d: counts[d])
+        majority_frac = counts[best_dir] / len(self._pred_history)
+
+        if majority_frac < 0.6:
+            return None, confidence
+
+        return best_dir, confidence
+
     # ── Test mode ─────────────────────────────────────────────────────────────
 
     def get_cursor_delta(
