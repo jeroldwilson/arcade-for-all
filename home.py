@@ -121,11 +121,7 @@ class HomeScreen:
         self._init_layout(screen)
 
     def _compute_games(self) -> list:
-        games = list(GAMES)
-        if self.mode != "keyboard":
-            games.append("magic_wand")
-            games.append("calibration")
-        return games
+        return list(GAMES)
 
     def _init_layout(self, screen: pygame.Surface) -> None:
         self._screen = screen
@@ -497,10 +493,6 @@ class HomeScreen:
             self._draw_snake_preview(area, dim)
         elif game_id == "fruit_ninja":
             self._draw_fruit_ninja_preview(area, dim)
-        elif game_id == "magic_wand":
-            self._draw_magic_wand_preview(area, dim)
-        elif game_id == "calibration":
-            self._draw_calibration_preview(area, dim)
 
         self._screen.set_clip(prev_clip)
 
@@ -599,86 +591,7 @@ class HomeScreen:
             ty = int(y0 + (y1 - y0) * t)
             pygame.draw.circle(self._screen, trail_clr, (tx, ty), max(2, int(3 * sc)))
 
-    def _draw_magic_wand_preview(self, area: pygame.Rect, dim: int) -> None:
-        sc = self._sc
-        cx, cy = area.centerx, area.centery
-        fade = dim / 255.0
 
-        # Wizard hat
-        hat_clr = tuple(min(255, int(c * fade)) for c in (80, 60, 150))
-        hat_h = int(30 * sc)
-        hat_w = int(25 * sc)
-        hat_y = cy - int(10 * sc)
-        pygame.draw.polygon(self._screen, hat_clr, [
-            (cx, hat_y - hat_h), (cx - hat_w, hat_y), (cx + hat_w, hat_y)
-        ])
-
-        # Wand
-        wand_clr = tuple(min(255, int(c * fade)) for c in (140, 90, 60))
-        wand_tip_clr = tuple(min(255, int(c * fade)) for c in (255, 255, 100))
-        wand_x, wand_y = cx + int(20 * sc), cy + int(20 * sc)
-        wand_len = int(40 * sc)
-        pygame.draw.line(self._screen, wand_clr, (wand_x, wand_y), (wand_x - wand_len, wand_y + wand_len), int(4 * sc))
-        tip_pos = (wand_x - wand_len, wand_y + wand_len)
-        pygame.draw.circle(self._screen, wand_tip_clr, tip_pos, int(5 * sc))
-
-    def _draw_calibration_preview(self, area: pygame.Rect, dim: int) -> None:
-        import math
-        sc  = self._sc
-        cx  = area.centerx
-        cy  = area.centery
-        r   = min(area.width, area.height) // 2 - max(2, int(3 * sc))
-
-        circle_clr = tuple(min(255, int(c * dim / 255)) for c in (40, 80, 120))
-        pygame.draw.circle(self._screen, circle_clr, (cx, cy), r)
-
-        tick_clr = tuple(min(255, int(c * dim / 255)) for c in (140, 170, 200))
-        for i in range(0, 360, 30):
-            angle    = math.radians(i - 90)
-            major    = (i % 90 == 0)
-            tick_len = r * (0.20 if major else 0.10)
-            x1 = cx + (r - tick_len) * math.cos(angle)
-            y1 = cy + (r - tick_len) * math.sin(angle)
-            x2 = cx + r * math.cos(angle)
-            y2 = cy + r * math.sin(angle)
-            pygame.draw.line(self._screen, tick_clr,
-                             (int(x1), int(y1)), (int(x2), int(y2)), 1)
-
-        lbl_r    = r - max(5, int(10 * sc))
-        card_clr = tuple(min(255, int(c * dim / 255)) for c in (255, 210, 50))
-        for label, deg in [("N", 0), ("E", 90), ("S", 180), ("W", 270)]:
-            angle = math.radians(deg - 90)
-            lx = cx + lbl_r * math.cos(angle)
-            ly = cy + lbl_r * math.sin(angle)
-            surf = self._font_desc.render(label, True, card_clr)
-            self._screen.blit(surf, surf.get_rect(center=(int(lx), int(ly))))
-
-        plane_sc  = r / 55.0
-        plane_clr = tuple(min(255, int(c * dim / 255)) for c in (220, 230, 240))
-
-        def _rot(x, y, angle_rad=0.0):
-            cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
-            return (int(cx + x * cos_a - y * sin_a),
-                    int(cy + x * sin_a + y * cos_a))
-
-        fuse = [
-            _rot(0,           -28 * plane_sc),
-            _rot(4  * plane_sc, -14 * plane_sc),
-            _rot(5  * plane_sc,  10 * plane_sc),
-            _rot(0,            24 * plane_sc),
-            _rot(-5 * plane_sc,  10 * plane_sc),
-            _rot(-4 * plane_sc, -14 * plane_sc),
-        ]
-        pygame.draw.polygon(self._screen, plane_clr, fuse)
-        for side in (-1, 1):
-            wing = [
-                _rot(side * 4  * plane_sc,  -5 * plane_sc),
-                _rot(side * 28 * plane_sc,   3 * plane_sc),
-                _rot(side * 23 * plane_sc,   8 * plane_sc),
-                _rot(side * 3  * plane_sc,   1 * plane_sc),
-            ]
-            pygame.draw.polygon(self._screen, plane_clr, wing)
-        pygame.draw.circle(self._screen, plane_clr, _rot(0, 0), max(2, int(3 * plane_sc)))
 
     def _draw_hint(self) -> None:
         sc = self._sc
@@ -687,7 +600,6 @@ class HomeScreen:
             ("Mouse",  "hover to choose • click to play"),
             ("Keys",   "← → to choose • Enter to play  •  F = fullscreen"),
             ("In-game", "L = Learn  •  T = Test  •  R = Regular mode"),
-            ("Calib.", "C = Functional Calibration (swing arm left/right)"),
         ]
         y = self._card_y + self._card_h + max(18, int(30 * sc))
         for label, text in controls:

@@ -313,21 +313,50 @@ class BricksGame:
     def run(self, gesture_source) -> str:
         """Run the game loop. Returns 'home' when player exits to menu."""
         self._gesture_source = gesture_source
+
+        # Target selection screen
+        goals_prompt = GameGoalsPrompt(self._screen, self._clock, mode=self._mode)
+        self._goal = goals_prompt.run(gesture_source)
+        if self._goal is None:
+            return "home"
+
         self._reset()
         pygame.mouse.set_visible(False)
         if self._audio:
             self._audio.start_background()
         while True:
             dt = self._clock.tick(FPS) / 1000.0
-            result = self._handle_events()
-            if result:
-                if self._learner is not None:
-                    self._learner.save_and_train()
-                if self._audio:
-                    self._audio.stop_background()
-                return result
-            if not self._paused and not self._game_over and not self._you_win:
-                self._update(dt)
+
+            # If celebration is active, update it and skip normal updates
+            if getattr(self, "_celebration", None) is not None:
+                if not self._celebration.update(dt):
+                    self._celebration = None
+                self._handle_events()
+            else:
+                result = self._handle_events()
+                if result:
+                    if self._learner is not None:
+                        self._learner.save_and_train()
+                    if self._audio:
+                        self._audio.stop_background()
+                    return result
+                if not self._paused and not self._game_over and not self._you_win:
+                    self._update(dt)
+
+                    # Target limit check
+                    if self._goal.check_met(self._score):
+                        self._you_win = True
+                        if self._audio:
+                            self._audio.play_success(self._username)
+
+                    # Check for 1000 points milestone
+                    current_milestone = self._score // 1000
+                    last_milestone = self._last_celebrated_score // 1000
+                    if current_milestone > last_milestone and self._score > 0:
+                        from shared.game_experience import FireworksCelebration
+                        self._celebration = FireworksCelebration(self._W, self._H, self._username, current_milestone * 1000)
+                        self._last_celebrated_score = self._score
+
             self._draw()
             pygame.display.flip()
 
@@ -337,6 +366,7 @@ class BricksGame:
         if hasattr(self, '_goal'):
             self._goal.start()
         self._score     = 0
+        self._last_celebrated_score = 0
         self._lives     = LIVES_START
         self._level     = 1
         self._paused    = False
@@ -435,10 +465,14 @@ class BricksGame:
     def _on_key(self, key: int) -> Optional[str]:
         if key == pygame.K_ESCAPE:
             if self._game_over or self._you_win:
+                from shared.game_experience import GameExitAppreciationScreen
+                GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_source)
                 return "home"
             else:
                 self._paused = not self._paused
         elif key == pygame.K_x and self._paused:
+            from shared.game_experience import GameExitAppreciationScreen
+            GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_source)
             return "home"
         elif key == pygame.K_r and (self._game_over or self._you_win):
             self._reset()
@@ -777,15 +811,17 @@ class BricksGame:
         if self._bounce_msg_timer > 0:
             self._draw_bounce_msg()
         if self._paused:
-            self._draw_overlay("PAUSED", "ESC to resume   X to menu")
+            self._draw_overlay("PAUSED", "ESC to resume   X to exit")
         if self._game_over:
-            self._draw_overlay("GAME OVER", f"Score: {self._score}   R=restart   ESC=menu")
+            self._draw_overlay("GAME OVER", f"Score: {self._score}   R=restart   ESC=exit")
         if self._you_win:
-            self._draw_overlay("YOU WIN!", f"Final score: {self._score}   R=restart   ESC=menu")
+            self._draw_overlay("YOU WIN!", f"Final score: {self._score}   R=restart   ESC=exit")
         if self._mode_toast > 0:
             self._draw_mode_toast()
         if self._show_validation and self._game_submode == "test":
             self._draw_validation_panel()
+        if getattr(self, "_celebration", None) is not None:
+            self._celebration.draw(self._screen, self._font_title, self._font_sub)
 
     def _draw_bricks(self) -> None:
         for brick in self._bricks:

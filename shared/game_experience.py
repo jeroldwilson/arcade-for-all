@@ -500,41 +500,325 @@ class GameGoal:
 
 
 class GameGoalsPrompt:
-    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
+    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, mode: str = "standard"):
         self.screen       = screen
         self.clock        = clock
-        self._font_large  = pygame.font.SysFont("Arial", 64, bold=True)
-        self._font        = pygame.font.SysFont("Arial", 36)
-        self.options      = [
-            ("Score Target: 200",  GameGoal(target_score=200)),
-            ("Score Target: 500",  GameGoal(target_score=500)),
-            ("Time Limit: 2 Min", GameGoal(target_time_sec=120)),
-            ("Time Limit: 5 Min", GameGoal(target_time_sec=300)),
-            ("Endless (10k Score)", GameGoal(target_score=10000)),
+        self.mode         = mode
+        self._W, self._H  = screen.get_size()
+        sc = min(self._W / 800, self._H / 600)
+        self._sc = sc
+
+        self.options = [
+            ("INDEFINITE", GameGoal(target_score=0, target_time_sec=0), [
+                "Play indefinitely.", "No score or time limits.", "Great for training!"
+            ], (110, 200, 255)),
+            ("SCORE TARGET", GameGoal(target_score=1000, target_time_sec=0), [
+                "Goal: 1000 Points.", "Classic arcade challenge.", "Test your endurance!"
+            ], (255, 140, 60)),
+            ("TIME TARGET", GameGoal(target_score=0, target_time_sec=120), [
+                "Goal: 2 Minutes.", "Score as much as possible!", "Race against the clock."
+            ], (100, 240, 120))
         ]
+
+        # "astra mode by default in indefinite mode"
+        # If mode is accessible (Astra), start with indefinite (index 0) selected
         self.selected_idx = 0
 
-    def run(self) -> GameGoal:
-        W, H = self.screen.get_size()
+        self._font_title = pygame.font.SysFont("Arial", max(20, int(42 * sc)), bold=True)
+        self._font_sub   = pygame.font.SysFont("Arial", max(8, int(14 * sc)))
+        self._font_card  = pygame.font.SysFont("Arial", max(14, int(22 * sc)), bold=True)
+        self._font_desc  = pygame.font.SysFont("Arial", max(7, int(12 * sc)))
+
+        self._nebula = NebulaBg()
+        self._card_rects = []
+        self._init_layout()
+
+    def _init_layout(self) -> None:
+        sc = self._sc
+        card_w = int(200 * sc)
+        card_h = int(260 * sc)
+        card_y = int(160 * sc)
+        gap    = int(30 * sc)
+
+        total_w = 3 * card_w + 2 * gap
+        margin  = (self._W - total_w) // 2
+
+        self._card_rects = []
+        for i in range(3):
+            x = margin + i * (card_w + gap)
+            self._card_rects.append(pygame.Rect(x, card_y, card_w, card_h))
+
+    def run(self, gesture_src=None) -> Optional[GameGoal]:
+        pygame.mouse.set_visible(True)
+        tilt_dir = 0
+        nav_cd = 0.0
+
         while True:
+            dt = self.clock.tick(60) / 1000.0
+            nav_cd = max(0.0, nav_cd - dt)
+
+            # Keyboard & Mouse events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    return GameGoal()
+                    return None
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_UP:
-                        self.selected_idx = (self.selected_idx - 1) % len(self.options)
-                    elif event.key == pygame.K_DOWN:
-                        self.selected_idx = (self.selected_idx + 1) % len(self.options)
-                    elif event.key == pygame.K_RETURN:
+                    if event.key == pygame.K_LEFT:
+                        self.selected_idx = (self.selected_idx - 1) % 3
+                    elif event.key == pygame.K_RIGHT:
+                        self.selected_idx = (self.selected_idx + 1) % 3
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         return self.options[self.selected_idx][1]
-            self.screen.fill((20, 20, 30))
-            title = self._font_large.render("Select Game Goal", True, (255, 255, 255))
-            self.screen.blit(title, title.get_rect(center=(W // 2, H // 4)))
-            start_y = H // 2 - 50
-            for i, (text, _) in enumerate(self.options):
-                color  = (0, 255, 100) if i == self.selected_idx else (150, 150, 150)
-                prefix = "▶ " if i == self.selected_idx else "  "
-                surf   = self._font.render(prefix + text, True, color)
-                self.screen.blit(surf, surf.get_rect(center=(W // 2, start_y + i * 50)))
+                    elif event.key == pygame.K_ESCAPE:
+                        return None
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, rect in enumerate(self._card_rects):
+                        if rect.collidepoint(pygame.mouse.get_pos()):
+                            return self.options[i][1]
+
+            # Mouse hover updates selection
+            mx, my = pygame.mouse.get_pos()
+            for i, rect in enumerate(self._card_rects):
+                if rect.collidepoint(mx, my):
+                    self.selected_idx = i
+
+            # Gestures
+            if gesture_src is not None:
+                gs = gesture_src.get_state()
+                if gs.calibrated:
+                    if gs.launch:
+                        return self.options[self.selected_idx][1]
+
+                    direction = 0
+                    if gs.paddle_velocity < -0.55:
+                        direction = -1
+                    elif gs.paddle_velocity > 0.55:
+                        direction = 1
+
+                    if direction != 0 and direction != tilt_dir and nav_cd <= 0:
+                        self.selected_idx = (self.selected_idx + direction) % 3
+                        nav_cd = 1.2
+                    tilt_dir = direction
+
+            # Drawing
+            self._nebula.update(dt)
+            self._nebula.draw(self.screen)
+
+            # Draw Title
+            title = self._font_title.render("SELECT PLAY TARGET", True, (255, 255, 255))
+            self.screen.blit(title, title.get_rect(center=(self._W // 2, int(60 * self._sc))))
+
+            sub = self._font_sub.render(
+                "tilt or arrow keys to choose   •   flick / enter / click to confirm",
+                True, (165, 165, 180)
+            )
+            self.screen.blit(sub, sub.get_rect(center=(self._W // 2, int(105 * self._sc))))
+
+            # Draw Cards
+            for i, (title_text, _, lines, accent) in enumerate(self.options):
+                rect = self._card_rects[i]
+                is_sel = (i == self.selected_idx)
+
+                # Card BG
+                pygame.draw.rect(self.screen, (30, 30, 52), rect, border_radius=10)
+
+                # Selected glow & borders
+                if is_sel:
+                    # Glow
+                    for extra, alpha in ((int(14*self._sc), 35), (int(9*self._sc), 22), (int(4*self._sc), 12)):
+                        gw = rect.width + extra * 2
+                        gh = rect.height + extra * 2
+                        gsurf = pygame.Surface((gw, gh), pygame.SRCALPHA)
+                        gclr = (*accent, alpha)
+                        pygame.draw.rect(gsurf, gclr, gsurf.get_rect(), border_radius=14)
+                        self.screen.blit(gsurf, (rect.left - extra, rect.top - extra))
+                    border_clr = accent
+                    border_w = 3
+                else:
+                    border_clr = tuple(max(0, c - 120) for c in accent)
+                    border_w = 2
+
+                pygame.draw.rect(self.screen, border_clr, rect, border_w, border_radius=10)
+
+                # Card Title
+                card_title_surf = self._font_card.render(title_text, True, accent if is_sel else (165, 165, 180))
+                self.screen.blit(card_title_surf, card_title_surf.get_rect(
+                    centerx=rect.centerx, top=rect.top + int(20 * self._sc)
+                ))
+
+                # Card description
+                for j, line in enumerate(lines):
+                    clr = (255, 255, 255) if is_sel else (165, 165, 180)
+                    surf = self._font_desc.render(line, True, clr)
+                    self.screen.blit(surf, surf.get_rect(
+                        centerx=rect.centerx,
+                        top=rect.top + int(100 * self._sc) + j * int(22 * self._sc)
+                    ))
+
+            # Draw Exit Hint at bottom
+            hint = self._font_sub.render("Press ESC to return to Home Screen", True, (150, 150, 160))
+            self.screen.blit(hint, hint.get_rect(center=(self._W // 2, self._H - int(60 * self._sc))))
+
             pygame.display.flip()
-            self.clock.tick(60)
+
+
+# ── FireworksCelebration ──────────────────────────────────────────────────────
+
+class FireworkParticle:
+    def __init__(self, x: float, y: float, color: Tuple[int, int, int]):
+        self.x = x
+        self.y = y
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(50, 250)
+        self.vx = math.cos(angle) * speed
+        self.vy = math.sin(angle) * speed
+        self.color = color
+        self.alpha = 255.0
+        self.decay = random.uniform(100, 200) # alpha decay per second
+        self.gravity = 150.0
+
+    def update(self, dt: float) -> bool:
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.vy += self.gravity * dt
+        self.alpha = max(0.0, self.alpha - self.decay * dt)
+        return self.alpha > 0
+
+
+class FireworksCelebration:
+    def __init__(self, W: int, H: int, username: str, score: int):
+        self.W = W
+        self.H = H
+        self.username = username
+        self.score = score
+        self.particles: List[FireworkParticle] = []
+        self.timer = 2.5 # 2.5 seconds duration
+        self.spawn_timer = 0.0
+        
+        # Predefined list of appreciation messages
+        appreciations = [
+            "Spectacular job", "Outstanding", "Incredible play", 
+            "Amazing effort", "Fantastic skill", "Superb movement"
+        ]
+        self.msg = f"{random.choice(appreciations)}, {username or 'Player'}!"
+        self._spawn_burst()
+
+    def _spawn_burst(self):
+        cx = random.randint(int(self.W * 0.2), int(self.W * 0.8))
+        cy = random.randint(int(self.H * 0.2), int(self.H * 0.6))
+        color = random.choice([
+            (255, 50, 50), (50, 255, 50), (50, 50, 255),
+            (255, 255, 50), (255, 50, 255), (50, 255, 255),
+            (255, 150, 50)
+        ])
+        for _ in range(60):
+            self.particles.append(FireworkParticle(cx, cy, color))
+
+    def update(self, dt: float) -> bool:
+        self.timer -= dt
+        self.spawn_timer -= dt
+        if self.spawn_timer <= 0 and self.timer > 0.5:
+            self._spawn_burst()
+            self.spawn_timer = 0.4
+
+        # Update particles
+        alive_particles = []
+        for p in self.particles:
+            if p.update(dt):
+                alive_particles.append(p)
+        self.particles = alive_particles
+
+        return self.timer > 0
+
+    def draw(self, screen: pygame.Surface, font_large: pygame.font.Font, font_small: pygame.font.Font) -> None:
+        # Draw semi-transparent dim overlay first
+        dim_surf = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        dim_surf.fill((10, 10, 20, 120))
+        screen.blit(dim_surf, (0, 0))
+
+        # Draw particles
+        for p in self.particles:
+            p_color = (*p.color, int(p.alpha))
+            p_surf = pygame.Surface((8, 8), pygame.SRCALPHA)
+            pygame.draw.circle(p_surf, p_color, (4, 4), 3)
+            screen.blit(p_surf, (int(p.x) - 4, int(p.y) - 4))
+
+        # Draw appreciation text
+        t_surf = font_large.render(self.msg, True, (255, 215, 0)) # Gold text
+        screen.blit(t_surf, t_surf.get_rect(center=(self.W // 2, self.H // 2 - 30)))
+
+        s_surf = font_small.render(f"You reached {self.score} points!", True, (255, 255, 255))
+        screen.blit(s_surf, s_surf.get_rect(center=(self.W // 2, self.H // 2 + 30)))
+
+
+# ── GameExitAppreciationScreen ────────────────────────────────────────────────
+
+class GameExitAppreciationScreen:
+    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, username: str, score: int):
+        self.screen = screen
+        self.clock = clock
+        self.username = username
+        self.score = score
+        self._W, self._H = screen.get_size()
+        sc = min(self._W / 800, self._H / 600)
+        self._sc = sc
+        self._font_title = pygame.font.SysFont("Arial", max(24, int(48 * sc)), bold=True)
+        self._font_score = pygame.font.SysFont("Arial", max(20, int(36 * sc)), bold=True)
+        self._font_msg   = pygame.font.SysFont("Arial", max(14, int(24 * sc)))
+        self._font_hint  = pygame.font.SysFont("Arial", max(10, int(16 * sc)))
+        self._nebula     = NebulaBg()
+
+        appreciations = [
+            "Spectacular job", "Outstanding", "Incredible play", 
+            "Amazing effort", "Fantastic skill", "Superb movement"
+        ]
+        self.msg = f"{random.choice(appreciations)}, {username or 'Player'}!"
+
+    def run(self, gesture_src=None) -> None:
+        pygame.mouse.set_visible(True)
+        t = 0.0
+        # Wait a tiny bit to prevent accidental immediately skip from previous keys/clicks
+        time.sleep(0.15)
+        pygame.event.clear()
+
+        while True:
+            dt = self.clock.tick(60) / 1000.0
+            t += dt
+
+            # Handle events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                        return
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    return
+
+            # Handle gesture source
+            if gesture_src is not None:
+                gs = gesture_src.get_state()
+                if gs.calibrated and gs.launch:
+                    return
+
+            # Draw background
+            self._nebula.update(dt)
+            self._nebula.draw(self.screen)
+
+            # Draw title
+            title_surf = self._font_title.render("SESSION COMPLETE", True, (255, 215, 0))
+            self.screen.blit(title_surf, title_surf.get_rect(center=(self._W // 2, self._H // 3)))
+
+            # Draw score
+            score_surf = self._font_score.render(f"Final Score: {self.score}", True, (255, 255, 255))
+            self.screen.blit(score_surf, score_surf.get_rect(center=(self._W // 2, self._H // 2)))
+
+            # Draw appreciation message
+            msg_surf = self._font_msg.render(self.msg, True, (100, 240, 120))
+            self.screen.blit(msg_surf, msg_surf.get_rect(center=(self._W // 2, self._H // 2 + 60)))
+
+            # Draw flashing prompt/hint
+            if int(t * 2) % 2 == 0:
+                hint_surf = self._font_hint.render("Press ESC, Space, Gesture Flick, or Click to Continue", True, (150, 150, 160))
+                self.screen.blit(hint_surf, hint_surf.get_rect(center=(self._W // 2, self._H - 80)))
+
+            pygame.display.flip()

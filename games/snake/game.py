@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.game_experience import GameGoalsPrompt, GameExitAppreciationScreen, FireworksCelebration
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
@@ -199,27 +200,58 @@ class SnakeGame:
     def run(self, gesture_src) -> str:
         """Run the game loop. Returns 'home' when player exits to menu."""
         self._gesture_src = gesture_src
+
+        # Target selection screen
+        goals_prompt = GameGoalsPrompt(self._screen, self._clock, mode=self._mode)
+        self._goal = goals_prompt.run(gesture_src)
+        if self._goal is None:
+            return "home"
+
         self._reset()
         pygame.mouse.set_visible(True)
         if self._audio:
             self._audio.start_background()
         while True:
             dt = self._clock.tick(FPS) / 1000.0
-            result = self._handle_events()
-            if result:
-                if self._learner is not None:
-                    self._learner.save_and_train()
-                if self._audio:
-                    self._audio.stop_background()
-                return result
-            if not self._paused and not self._game_over:
-                self._update(dt)
+
+            # If celebration is active, update it and skip normal updates
+            if getattr(self, "_celebration", None) is not None:
+                if not self._celebration.update(dt):
+                    self._celebration = None
+                self._handle_events()
+            else:
+                result = self._handle_events()
+                if result:
+                    if self._learner is not None:
+                        self._learner.save_and_train()
+                    if self._audio:
+                        self._audio.stop_background()
+                    return result
+                if not self._paused and not self._game_over:
+                    self._update(dt)
+
+                    # Target limit check
+                    if self._goal.check_met(self._score):
+                        self._game_over = True
+                        if self._audio:
+                            self._audio.play_success(self._username)
+
+                    # Check for 1000 points milestone
+                    current_milestone = self._score // 1000
+                    last_milestone = self._last_celebrated_score // 1000
+                    if current_milestone > last_milestone and self._score > 0:
+                        from shared.game_experience import FireworksCelebration
+                        self._celebration = FireworksCelebration(self._W, self._H, self._username, current_milestone * 1000)
+                        self._last_celebrated_score = self._score
+
             self._draw()
             pygame.display.flip()
 
     # ── State management ───────────────────────────────────────────────────────
 
     def _reset(self) -> None:
+        if hasattr(self, '_goal') and self._goal is not None:
+            self._goal.start()
         # Start in the middle, moving right, 3 cells long
         cx, cy = COLS // 2, ROWS // 2
         self._body: deque = deque([
@@ -228,6 +260,7 @@ class SnakeGame:
         self._direction   = Dir.RIGHT
         self._next_dir    = Dir.RIGHT
         self._score       = 0
+        self._last_celebrated_score = 0
         self._game_over   = False
         self._paused      = False
         self._move_timer  = 0.0
@@ -388,13 +421,19 @@ class SnakeGame:
     def _on_key(self, key: int) -> Optional[str]:
         if key == pygame.K_ESCAPE:
             if self._game_over:
+                from shared.game_experience import GameExitAppreciationScreen
+                GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_src)
                 return "home"
             self._paused = not self._paused
         elif key == pygame.K_x and self._paused:
+            from shared.game_experience import GameExitAppreciationScreen
+            GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_src)
             return "home"
         elif key == pygame.K_r and self._game_over:
             self._reset()
         elif key == pygame.K_h and self._game_over:
+            from shared.game_experience import GameExitAppreciationScreen
+            GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_src)
             return "home"
         elif key == pygame.K_f:
             self._toggle_fullscreen()
@@ -446,6 +485,58 @@ class SnakeGame:
                     )]
                 self._learner.try_record(gs, blade_xy, foods_xy, mode=self._mode)
                 self._guided.observe_class_counts(self._learner.class_counts)
+
+        # Check mouse/touchpad steering
+        mx, my = pygame.mouse.get_pos()
+        if not hasattr(self, "_prev_mouse_pos"):
+            self._prev_mouse_pos = (mx, my)
+
+        if (mx, my) != self._prev_mouse_pos:
+            self._prev_mouse_pos = (mx, my)
+            if self._cell > 0:
+                mgx = (mx - self._ox) // self._cell
+                mgy = (my - self._oy) // self._cell
+
+                # Check bounds
+                if 0 <= mgx < COLS and 0 <= mgy < ROWS:
+                    hx, hy = self._body[0]
+                    dx = mgx - hx
+                    dy = mgy - hy
+
+                    # Handle toroidal wrap
+                    if abs(dx - COLS) < abs(dx): dx -= COLS
+                    elif abs(dx + COLS) < abs(dx): dx += COLS
+                    if abs(dy - ROWS) < abs(dy): dy -= ROWS
+                    elif abs(dy + ROWS) < abs(dy): dy += ROWS
+
+                    new_dir = None
+                    if abs(dx) > abs(dy):
+                        if dx > 0 and self._direction != Dir.LEFT:
+                            new_dir = Dir.RIGHT
+                        elif dx < 0 and self._direction != Dir.RIGHT:
+                            new_dir = Dir.LEFT
+                    else:
+                        if dy > 0 and self._direction != Dir.UP:
+                            new_dir = Dir.DOWN
+                        elif dy < 0 and self._direction != Dir.DOWN:
+                            new_dir = Dir.UP
+
+                    # Fallback to other axis if 180deg turn
+                    if new_dir is None:
+                        if abs(dx) > 0:
+                            if dx > 0 and self._direction != Dir.LEFT:
+                                new_dir = Dir.RIGHT
+                            elif dx < 0 and self._direction != Dir.RIGHT:
+                                new_dir = Dir.LEFT
+                        if new_dir is None and abs(dy) > 0:
+                            if dy > 0 and self._direction != Dir.UP:
+                                new_dir = Dir.DOWN
+                            elif dy < 0 and self._direction != Dir.DOWN:
+                                new_dir = Dir.UP
+
+                    if new_dir is not None:
+                        self._apply_direction(new_dir)
+
         self._read_gesture(gs, dt)
 
         self._move_timer += dt
@@ -502,12 +593,14 @@ class SnakeGame:
         if self._debug:
             self._draw_debug()
         if self._paused:
-            self._draw_overlay("PAUSED", "ESC to resume   X to menu")
+            self._draw_overlay("PAUSED", "ESC to resume   X to exit")
         if self._game_over:
             self._draw_overlay(
                 "GAME OVER",
-                f"Score: {self._score}   R=restart   ESC/H=menu"
+                f"Score: {self._score}   R=restart   ESC=exit"
             )
+        if getattr(self, "_celebration", None) is not None:
+            self._celebration.draw(self._screen, self._font_lg, self._font_sm)
         if self._mode_toast > 0:
             self._draw_mode_toast()
         if self._show_validation and self._game_submode == "test":

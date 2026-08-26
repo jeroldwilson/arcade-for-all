@@ -76,15 +76,29 @@ class UsernameScreen:
         self._cursor_tick = 0.0
         self._error_msg   = ""
 
-    def run(self) -> str:
+    def _navigate(self, direction: int) -> None:
+        if not self._profiles:
+            self._selected = -1
+            return
+        num_options = len(self._profiles) + 1  # includes -1 for "New profile"
+        val = self._selected + 1  # shift -1 to 0
+        val = (val + direction) % num_options
+        self._selected = val - 1
+
+    def run(self, gesture_src=None) -> str:
         """Block until a valid username is confirmed. Returns the username."""
         pygame.mouse.set_visible(True)
+        tilt_dir = 0
+        nav_cd = 0.0
+
         while True:
             dt = self._clock.tick(60) / 1000.0
             self._cursor_tick += dt
             if self._cursor_tick >= 0.5:
                 self._cursor_tick = 0.0
                 self._cursor_vis  = not self._cursor_vis
+
+            nav_cd = max(0.0, nav_cd - dt)
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -93,6 +107,27 @@ class UsernameScreen:
                 if result:
                     save_profile(result)
                     return result
+
+            # Handle sensor gestures
+            if gesture_src is not None:
+                gs = gesture_src.get_state()
+                if gs.calibrated:
+                    if gs.launch:
+                        res = self._confirm()
+                        if res:
+                            save_profile(res)
+                            return res
+
+                    direction = 0
+                    if gs.paddle_velocity < -0.55:
+                        direction = -1
+                    elif gs.paddle_velocity > 0.55:
+                        direction = 1
+
+                    if direction != 0 and direction != tilt_dir and nav_cd <= 0:
+                        self._navigate(direction)
+                        nav_cd = 1.2
+                    tilt_dir = direction
 
             self._draw()
             pygame.display.flip()
@@ -111,18 +146,11 @@ class UsernameScreen:
             return self._confirm()
 
         elif key == pygame.K_ESCAPE:
-            # Allow skipping with ESC — use "Guest"
-            return "Guest"
+            return "quit"
 
         elif key == pygame.K_UP:
             # Navigate existing profiles (or to new)
-            if self._profiles:
-                if self._selected == -1:
-                    self._selected = len(self._profiles) - 1
-                else:
-                    self._selected = (self._selected - 1) % len(self._profiles)
-                    if self._selected == len(self._profiles) - 1:
-                        self._selected = -1  # wrap back to new
+            self._navigate(-1)
 
         elif key == pygame.K_DOWN:
             if self._profiles:

@@ -37,6 +37,7 @@ from shared.learn_test_support import (
 from shared.game_experience import (
     GameGoalsPrompt, InactivityMonitor, VisualEffects,
     NebulaBg, KatanaTrail, JuiceSplatter, ComboFlash, make_glow,
+    GameExitAppreciationScreen, FireworksCelebration,
 )
 from shared.assets import load_sprite, FRUIT_CATALOG
 
@@ -559,11 +560,14 @@ class FruitNinjaGame:
 
     def run(self, gesture_src) -> str:
         self._gesture_src = gesture_src
-        
-        # Game Goals
-        self._goal = GameGoalsPrompt(self._screen, self._clock).run()
+
+        # Game Goals Selection
+        goals_prompt = GameGoalsPrompt(self._screen, self._clock, mode=self._mode)
+        self._goal = goals_prompt.run(gesture_src)
+        if self._goal is None:
+            return "home"
         self._goal.start()
-        
+
         # Sensor & Effects
         self._sensor     = getattr(gesture_src, "sensor", None)
         self._inactivity = InactivityMonitor(self._username, self._sensor, self._audio)
@@ -572,50 +576,64 @@ class FruitNinjaGame:
         self._katana     = KatanaTrail()
         self._juice      = JuiceSplatter()
         self._combo_fx   = ComboFlash()
-        
+
         self._reset()
         pygame.mouse.set_visible(False)
         if self._audio:
             self._audio.start_background()
         while True:
             dt = min(self._clock.tick(FPS) / 1000.0, 0.05)
-            result = self._handle_events()
-            if result:
-                # Save gesture session and retrain model before leaving
-                if self._learner is not None:
-                    self._learner.save_and_train()
-                if self._audio:
-                    self._audio.stop_background()
-                return result
-                
-            if self._audio:
-                self._audio.update()
-                
-            # Update Inactivity
-            gs = self._gesture_src.get_state() if self._gesture_src else None
-            is_moving = self._moving
-            if gs is not None and self._paused:
-                # If paused, _update_blade isn't running, so we check for motion directly
-                gyro_mag = math.hypot(gs.abs_gz, gs.abs_gy)
-                visible_thresh = 8.0 # GYRO_VISIBLE_ACC
-                is_moving = (gyro_mag >= visible_thresh) or gs.launch
 
-            is_manually_paused = self._paused and not self._inactivity.is_paused
-            
-            action = self._inactivity.update(is_moving, is_manually_paused)
-            if action == "PAUSE":
-                self._paused = True
-                self._effects.trigger_pause()
+            # If celebration is active, update it and skip normal updates
+            if getattr(self, "_celebration", None) is not None:
+                if not self._celebration.update(dt):
+                    self._celebration = None
+                self._handle_events()
+            else:
+                result = self._handle_events()
+                if result:
+                    if self._learner is not None:
+                        self._learner.save_and_train()
+                    if self._audio:
+                        self._audio.stop_background()
+                    return result
+
                 if self._audio:
-                    self._audio.pause_background()
-            elif action == "RESUME":
-                self._paused = False
-                self._effects.trigger_resume()
-                if self._audio:
-                    self._audio.resume_background()
-                
-            if not self._paused and not self._game_over:
-                self._update(dt)
+                    self._audio.update()
+
+                # Update Inactivity
+                gs = self._gesture_src.get_state() if self._gesture_src else None
+                is_moving = self._moving
+                if gs is not None and self._paused:
+                    gyro_mag = math.hypot(gs.abs_gz, gs.abs_gy)
+                    visible_thresh = 8.0 # GYRO_VISIBLE_ACC
+                    is_moving = (gyro_mag >= visible_thresh) or gs.launch
+
+                is_manually_paused = self._paused and not self._inactivity.is_paused
+
+                action = self._inactivity.update(is_moving, is_manually_paused)
+                if action == "PAUSE":
+                    self._paused = True
+                    self._effects.trigger_pause()
+                    if self._audio:
+                        self._audio.pause_background()
+                elif action == "RESUME":
+                    self._paused = False
+                    self._effects.trigger_resume()
+                    if self._audio:
+                        self._audio.resume_background()
+
+                if not self._paused and not self._game_over:
+                    self._update(dt)
+
+                    # Check for 1000 points milestone
+                    current_milestone = self._score // 1000
+                    last_milestone = self._last_celebrated_score // 1000
+                    if current_milestone > last_milestone and self._score > 0:
+                        from shared.game_experience import FireworksCelebration
+                        self._celebration = FireworksCelebration(self._W, self._H, self._username, current_milestone * 1000)
+                        self._last_celebrated_score = self._score
+
             self._draw()
             pygame.display.flip()
 
@@ -626,6 +644,7 @@ class FruitNinjaGame:
             self._goal.start()
             
         self._score     = 0
+        self._last_celebrated_score = 0
         self._lives     = LIVES_START
         self._paused    = False
         self._game_over = False
@@ -673,6 +692,8 @@ class FruitNinjaGame:
     def _on_key(self, key: int) -> Optional[str]:
         if key == pygame.K_ESCAPE:
             if self._game_over:
+                from shared.game_experience import GameExitAppreciationScreen
+                GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_src)
                 return "home"
             self._paused = not self._paused
             if self._audio:
@@ -681,6 +702,8 @@ class FruitNinjaGame:
                 else:
                     self._audio.resume_background()
         elif key == pygame.K_x and self._paused:
+            from shared.game_experience import GameExitAppreciationScreen
+            GameExitAppreciationScreen(self._screen, self._clock, self._username, self._score).run(self._gesture_src)
             return "home"
         elif key == pygame.K_r and self._game_over:
             self._reset()
@@ -1120,12 +1143,14 @@ class FruitNinjaGame:
         if self._debug:
             self._draw_debug()
         if self._paused:
-            self._draw_overlay("PAUSED", "ESC to resume   X to menu")
+            self._draw_overlay("PAUSED", "ESC to resume   X to exit")
         self._inactivity.draw(self._screen)
         if self._game_over:
             self._draw_game_over()
         if self._show_validation and self._game_submode == "test":
             self._draw_validation_panel()
+        if getattr(self, "_celebration", None) is not None:
+            self._celebration.draw(self._screen, self._font_lg, self._font_sm)
 
     def _draw_bg(self) -> None:
         pass  # replaced by NebulaBg in _draw()

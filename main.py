@@ -257,7 +257,7 @@ def main() -> None:
 
     # ── Username prompt ────────────────────────────────────────────────────
     from shared.username_screen import UsernameScreen
-    username_result = UsernameScreen(screen, clock).run()
+    username_result = UsernameScreen(screen, clock).run(gesture_src)
     if username_result == "quit":
         gesture_src.stop()
         if sensor is not None:
@@ -272,15 +272,11 @@ def main() -> None:
     from games.bricks.game      import BricksGame
     from games.snake.game       import SnakeGame
     from games.fruit_ninja.game import FruitNinjaGame
-    from games.magic_wand.game  import MagicWandGame
-    from games.calibration.game import CalibrationGame
 
     GAME_REGISTRY = {
         "bricks":      BricksGame,
         "snake":       SnakeGame,
         "fruit_ninja": FruitNinjaGame,
-        "magic_wand":  MagicWandGame,
-        "calibration": CalibrationGame,
     }
 
     debug = args.debug   # tracks D-key toggles across home ↔ game transitions
