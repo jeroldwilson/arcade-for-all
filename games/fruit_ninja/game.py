@@ -123,7 +123,7 @@ DIM_CLR  = (160, 160, 180)
 # Base pixel radius at 800×600; will be scaled by sc at runtime
 _BASE_RADIUS = 46   # default sprite hit-radius base
 FRUIT_NAMES  = [f["id"] for f in FRUIT_CATALOG]
-FRUIT_RADII  = {f["id"]: int(_BASE_RADIUS * f["radius_frac"] / 0.40) for f in FRUIT_CATALOG}
+FRUIT_RADII  = {f["id"]: int(_BASE_RADIUS * f.get("size_multiplier", 1.0) * f["radius_frac"] / 0.40) for f in FRUIT_CATALOG}
 JUICE_COLORS = {f["id"]: f["juice_color"] for f in FRUIT_CATALOG}
 FRUIT_POINTS = {f["id"]: f["points"] for f in FRUIT_CATALOG}
 BOMB_R       = 38
@@ -440,16 +440,8 @@ _DRAWERS = {
 }
 
 # Juice colour per fruit kind
-JUICE_COLORS = {
-    "apple":       (215,  55,  55),
-    "watermelon":  (210,  55,  55),
-    "orange":      (240, 150,  30),
-    "banana":      (245, 220,  50),
-    "strawberry":  (210,  55,  80),
-    "lemon":       (245, 225,  45),
-    "pomegranate": (180,  25,  45),
-    "bomb":        ( 80,  80,  80),
-}
+JUICE_COLORS = {f["id"]: f["juice_color"] for f in FRUIT_CATALOG}
+JUICE_COLORS["bomb"] = (80, 80, 80)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -481,6 +473,7 @@ class FruitNinjaGame:
         self._cfg          = _ACC if mode == "accessible" else _STD
         self._game_submode = game_submode
         self._gesture_src  = None
+        self._fruit_bag: List[dict] = []
         self._submode_toast: float = 0.0   # seconds remaining for toast message
         self._show_validation: bool = False
         self._sklearn_missing: bool = False  # set True when sklearn is not installed
@@ -946,7 +939,10 @@ class FruitNinjaGame:
             fruit = Fruit(x=x, y=y, vx=vx, vy=vy, kind="bomb", r=r,
                           hazard=True, rot_spd=random.uniform(-3.5, 3.5))
         else:
-            entry = random.choice(FRUIT_CATALOG)
+            if not self._fruit_bag:
+                self._fruit_bag = list(FRUIT_CATALOG)
+                random.shuffle(self._fruit_bag)
+            entry = self._fruit_bag.pop()
             name  = entry["id"]
             r     = int(FRUIT_RADII[name] * sc)
             fruit = Fruit(x=x, y=y, vx=vx, vy=vy, kind=name, r=r,
@@ -1176,11 +1172,13 @@ class FruitNinjaGame:
 
     def _draw_fruits(self) -> None:
         for f in self._fruits:
-            sprite_px = int(SPRITE_BASE_PX * self._sc)
             if f.kind == "bomb":
+                sprite_px = int(SPRITE_BASE_PX * self._sc)
                 s = load_sprite("bomb.jpg", sprite_px)
             else:
                 entry = next((e for e in FRUIT_CATALOG if e["id"] == f.kind), None)
+                mult = entry.get("size_multiplier", 1.0) if entry else 1.0
+                sprite_px = int(SPRITE_BASE_PX * self._sc * mult)
                 asset = entry["asset"] if entry else "fruit_strawberry.jpg"
                 s = load_sprite(asset, sprite_px)
             rs = pygame.transform.rotate(s, math.degrees(f.rot))
@@ -1188,11 +1186,13 @@ class FruitNinjaGame:
 
     def _draw_halves(self) -> None:
         for h in self._halves:
-            sprite_px = int(SPRITE_BASE_PX * self._sc)
             if h.kind == "bomb":
+                sprite_px = int(SPRITE_BASE_PX * self._sc)
                 s = load_sprite("bomb.jpg", sprite_px)
             else:
                 entry = next((e for e in FRUIT_CATALOG if e["id"] == h.kind), None)
+                mult = entry.get("size_multiplier", 1.0) if entry else 1.0
+                sprite_px = int(SPRITE_BASE_PX * self._sc * mult)
                 # Use the slice (interior face) asset for halves — reveals juicy inside
                 asset = entry["slice_asset"] if entry and "slice_asset" in entry else (
                     entry["asset"] if entry else "fruit_strawberry_slice.jpg"
@@ -1202,8 +1202,6 @@ class FruitNinjaGame:
             half_w = sprite_px // 2
             clip_rect = pygame.Rect(0 if not h.flip else half_w, 0, half_w, sprite_px)
             half_surf = s.subsurface(clip_rect)
-            # Removed expensive .copy() and .set_alpha(h.alpha) which causes massive CPU lag 
-            # when used on per-pixel alpha surfaces.
             rs = pygame.transform.rotate(half_surf, math.degrees(h.angle))
             self._screen.blit(rs, rs.get_rect(center=(int(h.x), int(h.y))))
 

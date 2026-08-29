@@ -258,6 +258,7 @@ class MetaMotionSensor:
         self._using_sf: bool = False  # True when streaming via module 0x19 instead of raw 0x03/0x13
         self._address: Optional[str] = None  # stored in connect() for reconnect-after-SF-disconnect
         self._shutdown_event: Optional[asyncio.Event] = None
+        self._haptic_disabled: bool = False
 
     # ── Public sync API (for use from game / main thread) ─────────────────────
 
@@ -333,12 +334,14 @@ class MetaMotionSensor:
     def vibrate(self, duration: float = 0.15) -> None:
         """Trigger a short haptic buzz (duration in seconds)."""
         if not self._loop or not self._client or not self._connected:
-            logger.debug("vibrate: sensor not connected yet (skipping)")
+            return
+        if self._haptic_disabled:
             return
         try:
-            asyncio.run_coroutine_threadsafe(self._async_vibrate(duration), self._loop)
-        except Exception as e:
-            logger.warning("vibrate scheduling failed: %s", e)
+            fut = asyncio.run_coroutine_threadsafe(self._async_vibrate(duration), self._loop)
+            fut.add_done_callback(lambda f: None)
+        except Exception:
+            pass
 
     # ── Internal async machinery ───────────────────────────────────────────────
 
@@ -713,18 +716,18 @@ class MetaMotionSensor:
 
     async def _async_vibrate(self, duration: float = 0.15) -> None:
         """Async helper to trigger haptic buzz for duration seconds."""
-        if not self._client or not self._connected:
+        if not self._client or not self._connected or self._haptic_disabled:
             return
         try:
             ms = max(1, int(duration * 1000))
             lo = ms & 0xFF
             hi = (ms >> 8) & 0xFF
             payload = bytes([_MODULE_HAPTIC, 0x01, 0xF8, lo, hi])
-            await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, payload, response=True)
+            await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, payload, response=False)
             logger.debug("Haptic (async) buzz sent")
         except Exception as e:
-            if self._connected:
-                logger.warning("_async_vibrate failed: %s", e)
+            self._haptic_disabled = True
+            logger.debug("Haptic not supported on this board model (%s) — auto-disabled", e)
 
     async def _async_write(self, payload: bytes) -> None:
         """Fire-and-forget GATT write (used for read-trigger commands)."""

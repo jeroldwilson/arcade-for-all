@@ -58,12 +58,12 @@ def load_sprite(name: str, size: int) -> pygame.Surface:
 # ── Fruit catalog ─────────────────────────────────────────────────────────────
 
 FRUIT_CATALOG = [
-    {"id": "watermelon", "asset": "fruit_watermelon.jpg", "slice_asset": "fruit_watermelon_slice.jpg", "juice_color": (220, 30,  50),  "points": 20, "radius_frac": 0.42},
-    {"id": "strawberry", "asset": "fruit_strawberry.jpg", "slice_asset": "fruit_strawberry_slice.jpg", "juice_color": (230, 50,  80),  "points": 10, "radius_frac": 0.38},
-    {"id": "orange",     "asset": "fruit_orange.jpg",     "slice_asset": "fruit_orange_slice.jpg",     "juice_color": (245, 140, 30),  "points": 10, "radius_frac": 0.40},
-    {"id": "pineapple",  "asset": "fruit_pineapple.jpg",  "slice_asset": "fruit_pineapple_slice.jpg",  "juice_color": (240, 210, 40),  "points": 15, "radius_frac": 0.35},
-    {"id": "mango",      "asset": "fruit_mango.jpg",      "slice_asset": "fruit_mango_slice.jpg",      "juice_color": (255, 165, 30),  "points": 15, "radius_frac": 0.40},
-    {"id": "kiwi",       "asset": "fruit_kiwi.jpg",       "slice_asset": "fruit_kiwi_slice.jpg",       "juice_color": (60,  200, 60),  "points": 10, "radius_frac": 0.40},
-    {"id": "cherry",     "asset": "fruit_cherry.jpg",     "slice_asset": "fruit_cherry_slice.jpg",     "juice_color": (180, 10,  40),  "points": 25, "radius_frac": 0.30},
-    {"id": "peach",      "asset": "fruit_peach.jpg",      "slice_asset": "fruit_peach_slice.jpg",      "juice_color": (255, 150, 100), "points": 10, "radius_frac": 0.40},
+    {"id": "watermelon", "asset": "fruit_watermelon.jpg", "slice_asset": "fruit_watermelon_slice.jpg", "juice_color": (220, 30,  50),  "points": 20, "radius_frac": 0.42, "size_multiplier": 2.0},
+    {"id": "pineapple",  "asset": "fruit_pineapple.jpg",  "slice_asset": "fruit_pineapple_slice.jpg",  "juice_color": (240, 210, 40),  "points": 15, "radius_frac": 0.35, "size_multiplier": 1.5},
+    {"id": "mango",      "asset": "fruit_mango.jpg",      "slice_asset": "fruit_mango_slice.jpg",      "juice_color": (255, 165, 30),  "points": 15, "radius_frac": 0.40, "size_multiplier": 1.25},
+    {"id": "orange",     "asset": "fruit_orange.jpg",     "slice_asset": "fruit_orange_slice.jpg",     "juice_color": (245, 140, 30),  "points": 10, "radius_frac": 0.40, "size_multiplier": 1.0},
+    {"id": "peach",      "asset": "fruit_peach.jpg",      "slice_asset": "fruit_peach_slice.jpg",      "juice_color": (255, 150, 100), "points": 10, "radius_frac": 0.40, "size_multiplier": 1.0},
+    {"id": "kiwi",       "asset": "fruit_kiwi.jpg",       "slice_asset": "fruit_kiwi_slice.jpg",       "juice_color": (60,  200, 60),  "points": 10, "radius_frac": 0.40, "size_multiplier": 0.9},
+    {"id": "strawberry", "asset": "fruit_strawberry.jpg", "slice_asset": "fruit_strawberry_slice.jpg", "juice_color": (230, 50,  80),  "points": 10, "radius_frac": 0.38, "size_multiplier": 0.75},
+    {"id": "cherry",     "asset": "fruit_cherry.jpg",     "slice_asset": "fruit_cherry_slice.jpg",     "juice_color": (180, 10,  40),  "points": 25, "radius_frac": 0.30, "size_multiplier": 0.75},
 ]

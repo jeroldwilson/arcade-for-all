@@ -184,7 +184,7 @@ class JuiceSplatter:
             angle  = random.uniform(0, math.tau)
             speed  = random.uniform(60, 320)
             size   = random.uniform(3, 9)
-            bright = tuple(min(255, c + random.randint(-30, 60)) for c in color)
+            bright = tuple(max(0, min(255, c + random.randint(-30, 60))) for c in color)
             self._particles.append(JuiceParticle(
                 x, y, bright,            # type: ignore[arg-type]
                 math.cos(angle) * speed,
@@ -307,7 +307,7 @@ class VisualEffects:
     def trigger_brick_destroy(self, x: float, y: float,
                               color: Tuple[int, int, int], n: int = 14) -> None:
         for _ in range(n):
-            bright = tuple(min(255, c + random.randint(-20, 60)) for c in color)
+            bright = tuple(max(0, min(255, c + random.randint(-20, 60))) for c in color)
             self.particles.append(Particle(x, y, bright, size=random.uniform(3, 7)))  # type: ignore[arg-type]
 
     def trigger_resume(self) -> None:
