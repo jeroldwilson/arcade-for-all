@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.gesture_hud import GestureHUD
 from shared.game_experience import GameGoalsPrompt, GameExitAppreciationScreen, FireworksCelebration
 from shared.learn_test_support import (
     GuidedLearnFlow,
@@ -113,6 +114,7 @@ class SnakeGame:
         self._mode     = mode
         self._audio    = audio
         self._username = username
+        self.hud = GestureHUD("/Users/jerold/.gemini/antigravity-ide/brain/3c53c120-8bf4-4a05-a904-340edfef9b68/metamotion_kid_hand_flat_1788027714986.jpg", scale=0.3)
         self._game_submode = game_submode
         self._show_validation: bool = False
         self._sklearn_missing: bool = False
@@ -245,6 +247,9 @@ class SnakeGame:
                         self._last_celebrated_score = self._score
 
             self._draw()
+            gs = self._gesture_src.get_state() if getattr(self, "_gesture_src", None) is not None else None
+            if gs:
+                self.hud.draw(self._screen, gs, self._W - 100, self._H - 100)
             pygame.display.flip()
 
     # ── State management ───────────────────────────────────────────────────────

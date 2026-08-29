@@ -7,8 +7,9 @@ having them move a "magic wand" to collect sparkling orbs.
 
 import math
 import random
-import sys
-from dataclasses import dataclass
+import pygame
+from shared.learn_test_support import draw_gesture_debug_overlay
+from shared.gesture_hud import GestureHUD
 from typing import List, Optional, Tuple
 
 import pygame
@@ -54,6 +55,7 @@ class MagicWandGame:
         self._mode = mode
         self._audio = audio
         self._username = username
+        self.hud = GestureHUD("/Users/jerold/.gemini/antigravity-ide/brain/3c53c120-8bf4-4a05-a904-340edfef9b68/metamotion_kid_hand_flat_1788027714986.jpg", scale=0.3)
         self._gesture_src = None
 
         self._init_layout(screen)
@@ -115,6 +117,9 @@ class MagicWandGame:
                 return result
             self._update(dt)
             self._draw()
+            gs = self._gesture_src.get_state() if getattr(self, "_gesture_src", None) is not None else None
+            if gs:
+                self.hud.draw(self._screen, gs, self._W - 100, self._H - 100)
             pygame.display.flip()
 
     def _handle_events(self):

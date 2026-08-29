@@ -16,6 +16,7 @@ import sys
 from typing import List, Optional, Tuple
 
 import pygame
+from shared.gesture_hud import GestureHUD
 from shared.learn_test_support import draw_gesture_debug_overlay
 from shared.game_experience import NebulaBg
 
@@ -37,7 +38,7 @@ DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
 # ── Game metadata ─────────────────────────────────────────────────────────────
-GAMES = ["bricks", "snake", "fruit_ninja", "scratch_pad"]   # calibration & magic_wand added dynamically
+GAMES = ["bricks", "snake", "fruit_ninja", "scratch_pad", "math_choice"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
     "fruit_ninja": {
@@ -76,6 +77,12 @@ GAME_META = {
         "desc_ac": ["Draw with your sensor!", "Flick to toggle pen.", "Test ML gesture models."],
         "accent":  (200, 150, 255),
     },
+    "math_choice": {
+        "title":   "MATH CHOICE",
+        "desc":    ["Solve math problems!", "Tilt to select answer.", "Flick to confirm."],
+        "desc_ac": ["Solve math problems!", "Tilt or flick to answer.", "No time limits!"],
+        "accent":  (255, 100, 100),
+    },
 }
 
 MODE_META = {
@@ -108,6 +115,7 @@ class HomeScreen:
         self._clock    = clock
         self.mode      = mode
         self._username = username
+        self.hud = GestureHUD("/Users/jerold/.gemini/antigravity-ide/brain/3c53c120-8bf4-4a05-a904-340edfef9b68/metamotion_kid_hand_flat_1788027714986.jpg", scale=0.3)
         self._debug    = debug
 
         self._games: list = self._compute_games()
@@ -219,10 +227,12 @@ class HomeScreen:
                 return result
 
             self._draw()
-            if self._debug and gesture_src is not None:
-                gs = gesture_src.get_state()
+            gs = gesture_src.get_state() if gesture_src is not None else None
+            if self._debug and gs is not None:
                 draw_gesture_debug_overlay(
                     self._screen, gs, self._W, self._H, self._sc, self._font_card)
+            if gs is not None:
+                self.hud.draw(self._screen, gs, self._W - 100, self._H - 100)
             pygame.display.flip()
 
     # ── Input handling ────────────────────────────────────────────────────────

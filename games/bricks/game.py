@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import pygame
+from shared.gesture_hud import GestureHUD
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
@@ -217,6 +218,7 @@ class BricksGame:
         self._gesture_source = None
         self._debug          = debug
         self._username       = username
+        self.hud             = GestureHUD(scale=0.3)
         self._game_submode   = game_submode
         self._show_validation: bool = False
         self._sklearn_missing: bool = False
@@ -358,6 +360,9 @@ class BricksGame:
                         self._last_celebrated_score = self._score
 
             self._draw()
+            gs = self._gesture_source.get_state() if getattr(self, "_gesture_source", None) is not None else None
+            if gs:
+                self.hud.draw(self._screen, gs, self._W - 100, self._H - 100)
             pygame.display.flip()
 
     # ── State management ───────────────────────────────────────────────────────

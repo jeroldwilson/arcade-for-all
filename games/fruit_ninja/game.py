@@ -28,6 +28,7 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import pygame
 from shared.gameplay_config import FRUIT_NINJA_ACCESSIBLE as _ACC, FRUIT_NINJA_STANDARD as _STD, INACTIVITY_CONFIG as _INACT
+from shared.gesture_hud import GestureHUD
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
@@ -475,8 +476,10 @@ class FruitNinjaGame:
         self._mode         = mode
         self._audio        = audio
         self._debug        = debug
-        self._game_submode = game_submode
         self._username     = username
+        self.hud = GestureHUD("/Users/jerold/.gemini/antigravity-ide/brain/3c53c120-8bf4-4a05-a904-340edfef9b68/metamotion_kid_hand_flat_1788027714986.jpg", scale=0.3)
+        self._cfg          = _ACC if mode == "accessible" else _STD
+        self._game_submode = game_submode
         self._gesture_src  = None
         self._submode_toast: float = 0.0   # seconds remaining for toast message
         self._show_validation: bool = False
@@ -636,6 +639,9 @@ class FruitNinjaGame:
                         self._last_celebrated_score = self._score
 
             self._draw()
+            gs = self._gesture_src.get_state() if getattr(self, "_gesture_src", None) is not None else None
+            if gs:
+                self.hud.draw(self._screen, gs, self._W - 100, self._H - 100)
             pygame.display.flip()
 
     # ── State ─────────────────────────────────────────────────────────────────

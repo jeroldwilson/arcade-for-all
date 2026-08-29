@@ -20,6 +20,7 @@ from typing import List, Tuple
 
 import pygame
 from shared.learn_test_support import draw_gesture_debug_overlay
+from shared.gesture_hud import GestureHUD
 
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -78,8 +79,10 @@ class CalibrationGame:
         self._clock    = clock
         self._debug    = debug
         self._mode     = mode
+        self._audio = audio
         self._username = username
-
+        self.hud = GestureHUD("/Users/jerold/.gemini/antigravity-ide/brain/3c53c120-8bf4-4a05-a904-340edfef9b68/metamotion_kid_hand_flat_1788027714986.jpg", scale=0.3)
+        self._gesture_src = None
         self._yaw_deg = 0.0          # integrated from gz
         self._last_gz = 0.0          # for smooth yaw integration
         self._mode_toast: float = 0.0
@@ -212,6 +215,8 @@ class CalibrationGame:
                 ts.set_alpha(alpha)
                 self._screen.blit(ts, ts.get_rect(
                     center=(self._W // 2, self._H - max(20, int(24 * sc)))))
+            if gs:
+                self.hud.draw(self._screen, gs, self._W - 100, self._H - 100)
             pygame.display.flip()
 
         return "home"
