@@ -1,0 +1,13 @@
+- [x] Update `shared/audio.py`
+  - [x] Support MP3 file playback for background music.
+  - [x] Add `play_encourage(username)` to pause BGM and play encourage MP3.
+  - [x] Add `play_success(username)` to stop BGM and play success MP3.
+  - [x] Add `update()` to monitor encourage playback and resume BGM when finished.
+- [x] Update `shared/game_experience.py`
+  - [x] Pass `AudioEngine` to `InactivityMonitor`.
+  - [x] Add a 50-second cooldown timer for encourage audio.
+  - [x] Trigger `audio.play_encourage()` when inactive.
+- [x] Update `games/fruit_ninja/game.py`
+  - [x] Pass `_audio` to `InactivityMonitor`.
+  - [x] Call `_audio.update()` in main loop.
+  - [x] Call `_audio.play_success()` on game win.

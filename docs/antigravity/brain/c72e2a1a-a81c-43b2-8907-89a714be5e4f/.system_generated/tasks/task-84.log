@@ -1,0 +1,8 @@
+pygame-ce 2.5.6 (SDL 2.32.10, Python 3.9.6)
+pygame-ce version: 2.5.6
+Assets module OK, fruits: ['watermelon', 'strawberry', 'orange', 'pineapple', 'mango', 'kiwi', 'cherry', 'peach']
+game_experience module OK
+home.py OK
+bricks OK
+fruit_ninja OK
+ALL CLEAR

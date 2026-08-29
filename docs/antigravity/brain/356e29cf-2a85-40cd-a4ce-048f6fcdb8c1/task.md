@@ -1,0 +1,19 @@
+- [x] **1. Sensor LED Upgrades**
+  - [x] Modify `shared/sensor.py` to support Red, Green, and Blue LED channels.
+  - [x] Add `set_ambient_light(on, color)` method to pick random colors.
+- [ ] **2. Inactivity Feedback (Shared)**
+  - [ ] Create shared logic (e.g., in `shared/learn_test_support.py` or new file) for inactivity tracking.
+  - [ ] Trigger haptics and random colored LEDs after X seconds.
+  - [ ] Draw random encouraging messages on screen.
+- [ ] **3. Game Goals Prompt (Shared)**
+  - [ ] Create a shared setup screen overlay for Score/Time/Indefinite goals.
+  - [ ] Integrate into `fruit_ninja`, `bricks`, and `snake` start logic.
+- [ ] **4. Auto-Pause & Resume**
+  - [ ] Implement auto-pause state when inactivity exceeds threshold.
+  - [ ] Resume on motion.
+- [ ] **5. Visual Effects (Fireworks & Points)**
+  - [ ] Add particle effects for points.
+  - [ ] Add fireworks for game over / target reached.
+  - [ ] Sync fireworks with sensor haptics and LEDs.
+- [ ] **6. Seamless Learning Flow**
+  - [ ] Update `gesture_learner.py` guided flow to transition directly to play instead of home.

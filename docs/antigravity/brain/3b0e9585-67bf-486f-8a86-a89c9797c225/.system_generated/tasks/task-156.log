@@ -1,0 +1,33 @@
+pygame-ce 2.5.6 (SDL 2.32.10, Python 3.9.6)
+
+  █████╗ ██████╗  ██████╗ █████╗ ██████╗ ███████╗
+ ██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔══██╗██╔════╝
+ ███████║██████╔╝██║     ███████║██║  ██║█████╗
+ ██╔══██║██╔══██╗██║     ██╔══██║██║  ██║██╔══╝
+ ██║  ██║██║  ██║╚██████╗██║  ██║██████╔╝███████╗
+ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═════╝╚══════╝
+          F  O  R     A  L  L
+
+  Mode   : KEYBOARD
+
+  Sensor controls:
+    Tilt wrist LEFT / RIGHT  →  move / navigate
+    Tilt wrist FORWARD/BACK  →  up / down (Snake)
+    Flick wrist UP           →  launch ball / select game
+    Rotate wrist CW/CCW      →  ball spin / curve (Bricks)
+
+  Keyboard shortcuts (always available):
+    ← / →          move paddle / navigate cards
+    ↑ / ↓          Snake direction
+    SPACE          launch ball
+    L              learn mode (gesture training)
+    T              test mode (model-assisted control)
+    V              validation panel (in test mode)
+    G              guided/manual toggle (in learn mode)
+    ESC            pause / back to menu
+    R              restart (after game over)
+    D              toggle debug HUD
+    F              toggle fullscreen
+
+[main] Shutting down…
+[main] Done.

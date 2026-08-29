@@ -1,0 +1,5 @@
+{
+  "summary": "A comprehensive beginner-friendly explainer of the gesture detection pipeline for the MetaMotion S in the Bricks/Arcade-for-All project. Covers: what sensor data is captured (accelerometer + gyroscope at 100Hz), hardware vs software sensor fusion (Bosch Kalman vs Madgwick AHRS), rule-based gesture detection (tilt/flick/twist via thresholds and low-pass filters), machine learning for Fruit Ninja slice direction (Random Forest with 38 hand-crafted features), auto-labeling, cross-validation, and alternative approaches.",
+  "updatedAt": "2026-08-09T04:17:42.387445Z",
+  "userFacing": true
+}

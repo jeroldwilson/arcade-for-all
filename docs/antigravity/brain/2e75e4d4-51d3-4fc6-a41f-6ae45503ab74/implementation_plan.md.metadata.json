@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan addressing MetaMotion sensor fusion instability, magnetometer issues, and calibration UI fragility by switching to IMUPlus mode and outlining long-term SDK migration.",
+  "updatedAt": "2026-08-02T00:15:15.006674Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

@@ -1,0 +1,8 @@
+- [x] Clean up main.py and home.py (remove magic wand and calibration games)
+- [x] Implement new horizontal card-based GameGoalsPrompt in shared/game_experience.py
+- [x] Add FireworksCelebration and GameExitAppreciationScreen to shared/game_experience.py
+- [x] Add gesture control and esc-exit to UsernameScreen in shared/username_screen.py
+- [x] Integrate target selection, exit appreciation, and fireworks in games/bricks/game.py
+- [x] Integrate mouse steering, target selection, exit appreciation, and fireworks in games/snake/game.py
+- [x] Integrate target selection, exit appreciation, and fireworks in games/fruit_ninja/game.py
+- [x] Perform manual validation of all features

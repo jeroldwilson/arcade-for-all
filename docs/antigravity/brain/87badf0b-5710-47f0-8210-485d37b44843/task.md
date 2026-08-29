@@ -1,0 +1,15 @@
+- [x] **Phase 2: Enhance the Gesture Learner for CP**
+  - [x] Update feature extraction in `gesture_learner.py` to use `abs_ax`, `abs_ay`, `abs_gx`, `abs_gy` (Verified already implemented)
+  - [x] Implement Confidence Score output from the ML engine (Added `predict` returning label + confidence)
+- [ ] **Phase 1 & 3: Re-wire Accessible Mode Game Logic & Integrate Confidence Scores**
+  - [x] **Snake**: 
+    - [x] Use ML Learner predictions ("Left", "Right", etc.) for steering in Accessible Mode
+    - [x] Implement confidence-based logic (>0.8 normal, 0.4-0.8 assist, <0.4 ignore)
+    - [x] Add wall-collision failsafe auto-turn
+  - [x] **Bricks**: 
+    - [x] Use ML Learner predictions for paddle movement in Accessible Mode
+    - [x] Implement confidence-based logic
+    - [x] Add magnetic "snap-to-ball" assist when near the ball (confidence 0.4-0.8)
+  - [x] **Fruit Ninja**: 
+    - [x] Implement low-pass smoothing filter on cursor velocity for Accessible Mode
+    - [x] Apply confidence-based scaling/assistance if applicable

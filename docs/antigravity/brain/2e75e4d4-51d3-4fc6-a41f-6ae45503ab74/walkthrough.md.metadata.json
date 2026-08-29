@@ -1,0 +1,5 @@
+{
+  "summary": "Walkthrough detailing the stabilization of the MetaMotion sensor orientation and the removal of the confusing calibration UI by switching to IMUPlus mode.",
+  "updatedAt": "2026-08-02T00:16:59.941607Z",
+  "userFacing": true
+}

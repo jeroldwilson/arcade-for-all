@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/jerold/.gemini/antigravity-ide/brain/c70a743e-c73d-4e21-ba67-04a14e59efc1/scratch/dtw_test.py", line 8, in <module>
+    from shared.dtw_learner import OrientationIndependentExtractor, DTWEngine, TemplateRefiner, IMUSnapshot
+ModuleNotFoundError: No module named 'shared'
