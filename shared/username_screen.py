@@ -57,24 +57,34 @@ class UsernameScreen:
     Returns the chosen username string.
     """
 
-    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
+    def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock, current_username: str = ""):
         self._screen = screen
         self._clock  = clock
         self._W, self._H = screen.get_size()
         sc = min(self._W / 800, self._H / 600)
         self._sc = sc
 
-        self._font_title = pygame.font.SysFont("monospace", max(22, int(40 * sc)), bold=True)
-        self._font_lg    = pygame.font.SysFont("monospace", max(16, int(28 * sc)), bold=True)
-        self._font_md    = pygame.font.SysFont("monospace", max(12, int(20 * sc)))
-        self._font_sm    = pygame.font.SysFont("monospace", max( 9, int(14 * sc)))
+        self._font_title = self._make_font(max(22, int(40 * sc)), bold=True)
+        self._font_lg    = self._make_font(max(16, int(28 * sc)), bold=True)
+        self._font_md    = self._make_font(max(12, int(20 * sc)), bold=False)
+        self._font_sm    = self._make_font(max( 9, int(14 * sc)), bold=False)
 
         self._profiles    = _load_profiles()
-        self._selected    = -1              # -1 = "New profile" entry
+        if current_username and current_username in self._profiles:
+            self._selected = self._profiles.index(current_username)
+        else:
+            self._selected = 0 if self._profiles else -1  # -1 = "New profile" entry
         self._text_input  = ""             # typed characters
         self._cursor_vis  = True
         self._cursor_tick = 0.0
         self._error_msg   = ""
+
+    @staticmethod
+    def _make_font(size: int, bold: bool = False) -> pygame.font.Font:
+        try:
+            return pygame.font.SysFont("monospace", size, bold=bold)
+        except Exception:
+            return pygame.font.Font(None, max(12, int(size * 1.15)))
 
     def _navigate(self, direction: int) -> None:
         if not self._profiles:

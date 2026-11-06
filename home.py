@@ -37,7 +37,7 @@ TEXT_CLR   = (255, 255, 255)
 DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
-GAMES = ["villain_slicer", "fruit_ninja", "bricks", "snake", "scratch_pad", "math_choice"]   # calibration & magic_wand added dynamically
+GAMES = ["math_choice", "fruit_ninja", "bricks", "snake", "villain_slicer", "scratch_pad"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
     "villain_slicer": {
@@ -83,10 +83,10 @@ GAME_META = {
         "accent":  (200, 150, 255),
     },
     "math_choice": {
-        "title":   "MATH CHOICE",
-        "desc":    ["Solve math problems!", "Tilt to select answer.", "Flick to confirm."],
-        "desc_ac": ["Solve math problems!", "Tilt or flick to answer.", "No time limits!"],
-        "accent":  (255, 100, 100),
+        "title":   "CYBER MATH",
+        "desc":    ["Blast neon answer portals!", "Move, swipe, or tilt toward answer.", "Voice TTS & Boss Mecha rounds!"],
+        "desc_ac": ["Blast neon answer portals!", "Move or wave toward the answer!", "Voice reads numbers & cheers you!"],
+        "accent":  (0, 235, 255),
     },
 }
 
@@ -127,6 +127,8 @@ class HomeScreen:
         self._selected_idx: int = 0
         self._scroll_offset: int = 0    # index of leftmost visible card
         self._hover_idx: Optional[int] = None
+        self._profile_rect: Optional[pygame.Rect] = None
+        self._profile_hover: bool = False
 
         # Tilt navigation state
         self._tilt_dir: int       = 0
@@ -169,14 +171,21 @@ class HomeScreen:
         self._margin   = margin
         self._n_vis    = n_vis
 
-        self._font_title = pygame.font.SysFont("Arial", max(20, int(42 * sc)), bold=True)
-        self._font_sub   = pygame.font.SysFont("Arial", max( 8, int(14 * sc)))
-        self._font_card  = pygame.font.SysFont("Arial", max(14, int(22 * sc)), bold=True)
-        self._font_desc  = pygame.font.SysFont("Arial", max( 7, int(12 * sc)))
+        self._font_title = self._make_font(max(20, int(42 * sc)), bold=True)
+        self._font_sub   = self._make_font(max( 8, int(14 * sc)), bold=False)
+        self._font_card  = self._make_font(max(14, int(22 * sc)), bold=True)
+        self._font_desc  = self._make_font(max( 7, int(12 * sc)), bold=False)
 
         self._update_card_rects()
         if not hasattr(self, "_nebula"):
             self._nebula = NebulaBg()
+
+    @staticmethod
+    def _make_font(size: int, bold: bool = False) -> pygame.font.Font:
+        try:
+            return pygame.font.SysFont("Arial", size, bold=bold)
+        except Exception:
+            return pygame.font.Font(None, max(10, int(size * 1.15)))
 
     def _update_card_rects(self) -> None:
         """Recompute visible card rects based on current scroll offset."""
@@ -252,6 +261,8 @@ class HomeScreen:
                 return self._games[self._selected_idx]
             elif event.key == pygame.K_m:
                 self._cycle_mode()
+            elif event.key in (pygame.K_u, pygame.K_p):
+                self._switch_profile()
             elif event.key == pygame.K_d:
                 self._debug = not self._debug
             elif event.key == pygame.K_f:
@@ -263,13 +274,32 @@ class HomeScreen:
             elif event.key == pygame.K_ESCAPE:
                 return "quit"
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self._profile_rect is not None and self._profile_rect.collidepoint(event.pos):
+                self._switch_profile()
+                return None
             if self._hover_idx is not None:
                 global_idx = self._scroll_offset + self._hover_idx
                 return self._games[global_idx]
         return None
 
+    def _switch_profile(self) -> None:
+        """Open UsernameScreen to switch or create a user profile."""
+        from shared.username_screen import UsernameScreen
+        res = UsernameScreen(
+            self._screen, self._clock, current_username=self._username
+        ).run(getattr(self, "_gesture_src", None))
+        if res and res != "quit":
+            self._username = res
+        # Re-sync layout in case surface changed
+        cur = pygame.display.get_surface()
+        if cur is not None:
+            self._init_layout(cur)
+
     def _update_hover(self) -> None:
         mx, my = pygame.mouse.get_pos()
+        self._profile_hover = bool(
+            self._profile_rect is not None and self._profile_rect.collidepoint(mx, my)
+        )
         self._hover_idx = None
         for slot, rect in enumerate(self._card_rects):
             global_idx = self._scroll_offset + slot
@@ -364,11 +394,9 @@ class HomeScreen:
         sc = self._sc
         cx = self._W // 2
         title = self._font_title.render("SELECT YOUR GAME", True, TEXT_CLR)
-        self._screen.blit(title, title.get_rect(center=(cx, int(52 * sc))))
+        self._screen.blit(title, title.get_rect(center=(cx, int(46 * sc))))
 
-        if self._username:
-            user_surf = self._font_sub.render(f"Player: {self._username}", True, (150, 200, 150))
-            self._screen.blit(user_surf, user_surf.get_rect(center=(cx, int(76 * sc))))
+        self._draw_profile_badge(cx, int(74 * sc))
 
         sub = self._font_sub.render(
             "tilt or arrow keys to choose   •   flick / enter / click to play",
@@ -376,6 +404,33 @@ class HomeScreen:
         )
         self._screen.blit(sub, sub.get_rect(center=(cx, int(96 * sc))))
         self._draw_mode_badge()
+
+    def _draw_profile_badge(self, cx: int, cy: int) -> None:
+        """Draw a clickable Player Profile pill that opens the profile switcher."""
+        sc = self._sc
+        display_user = self._username if self._username else "Guest"
+        color = (0, 235, 255) if self._profile_hover else (130, 230, 150)
+        label = f"PLAYER: {display_user}   (U / Click = switch profile)"
+        surf = self._font_sub.render(label, True, color)
+        rect = surf.get_rect(center=(cx, cy))
+        pad = pygame.Rect(
+            rect.left - int(10 * sc),
+            rect.top - max(2, int(3 * sc)),
+            rect.width + int(20 * sc),
+            rect.height + max(4, int(6 * sc)),
+        )
+        self._profile_rect = pad
+        bg = pygame.Surface((pad.width, pad.height), pygame.SRCALPHA)
+        bg.fill((*color, 55 if self._profile_hover else 28))
+        self._screen.blit(bg, pad.topleft)
+        pygame.draw.rect(
+            self._screen,
+            color if self._profile_hover else (*color, 130),
+            pad,
+            2 if self._profile_hover else 1,
+            border_radius=max(4, int(8 * sc)),
+        )
+        self._screen.blit(surf, rect)
 
     def _draw_mode_badge(self) -> None:
         sc    = self._sc
@@ -508,16 +563,128 @@ class HomeScreen:
         pygame.draw.rect(self._screen, (10, 10, 20), area, border_radius=6)
         dim = 180 if active else 100
 
-        if game_id == "bricks":
+        if game_id == "math_choice":
+            self._draw_math_choice_preview(area, dim)
+        elif game_id == "bricks":
             self._draw_bricks_preview(area, dim)
         elif game_id == "snake":
             self._draw_snake_preview(area, dim)
         elif game_id == "fruit_ninja":
             self._draw_fruit_ninja_preview(area, dim)
+        elif game_id == "villain_slicer":
+            self._draw_villain_slicer_preview(area, dim)
         elif game_id == "scratch_pad":
             self._draw_scratch_pad_preview(area, dim)
 
         self._screen.set_clip(prev_clip)
+
+    def _draw_math_choice_preview(self, area: pygame.Rect, dim: int) -> None:
+        """Render an animated Cyber Math Overdrive preview inside the card."""
+        sc = self._sc
+        fade = dim / 255.0
+        t = pygame.time.get_ticks() / 1000.0
+
+        def _c(r: int, g: int, b: int) -> Tuple[int, int, int]:
+            return (
+                min(255, int(r * fade)),
+                min(255, int(g * fade)),
+                min(255, int(b * fade)),
+            )
+
+        cx = area.centerx
+        # 1. Perspective cyber horizon grid at the bottom of the preview
+        hor_y = area.top + int(area.height * 0.76)
+        grid_col = _c(25, 85, 145)
+        pygame.draw.line(self._screen, _c(0, 190, 245), (area.left, hor_y), (area.right, hor_y), 1)
+        for i in range(-4, 5):
+            bx = cx + int(i * 26 * sc)
+            pygame.draw.line(self._screen, grid_col, (cx, hor_y), (bx, area.bottom), 1)
+        for row_f in (0.35, 0.72):
+            gy = int(hor_y + (area.bottom - hor_y) * row_f)
+            pygame.draw.line(self._screen, grid_col, (area.left, gy), (area.right, gy), 1)
+
+        # 2. Top Holographic Problem Core ("7 × 8")
+        core_w = int(area.width * 0.62)
+        core_h = max(18, int(28 * sc))
+        core_rect = pygame.Rect(cx - core_w // 2, area.top + max(6, int(8 * sc)), core_w, core_h)
+        pygame.draw.rect(self._screen, _c(18, 32, 64), core_rect, border_radius=max(4, int(6 * sc)))
+        pygame.draw.rect(self._screen, _c(0, 235, 255), core_rect, max(1, int(2 * sc)), border_radius=max(4, int(6 * sc)))
+
+        eq_surf = self._font_sub.render("7 × 8 = ?", True, _c(255, 255, 255))
+        self._screen.blit(eq_surf, eq_surf.get_rect(center=core_rect.center))
+
+        # 3. Left & Right Rotating Hexagonal Answer Portals
+        portal_y = area.top + int(area.height * 0.52)
+        left_x = area.left + int(area.width * 0.26)
+        right_x = area.left + int(area.width * 0.74)
+        hex_r = max(12, int(22 * sc))
+
+        for side_idx, (px, val_str, base_rgb, is_target) in enumerate([
+            (left_x,  "54", (0, 220, 255), False),
+            (right_x, "56", (60, 255, 140), True),
+        ]):
+            rot = t * (1.2 if is_target else -0.6)
+            pts = [
+                (
+                    int(px + hex_r * math.cos(rot + k * math.pi / 3)),
+                    int(portal_y + hex_r * math.sin(rot + k * math.pi / 3)),
+                )
+                for k in range(6)
+            ]
+            pygame.draw.polygon(self._screen, _c(16, 28, 52), pts)
+            pygame.draw.polygon(self._screen, _c(*base_rgb), pts, max(1, int(2 * sc)))
+
+            if is_target:
+                # Pulsing outer lock-in ring on the target answer
+                ring_r = hex_r + max(2, int(4 * sc))
+                pygame.draw.circle(self._screen, _c(255, 230, 70), (px, portal_y), ring_r, 1)
+
+            ans_s = self._font_sub.render(val_str, True, _c(255, 255, 255))
+            self._screen.blit(ans_s, ans_s.get_rect(center=(px, portal_y)))
+
+        # 4. Bottom-center Cyber Plasma Turret firing a laser beam toward the right answer ("56")
+        turret_x = cx
+        turret_y = area.bottom - max(6, int(10 * sc))
+        # Animated beam pulse
+        beam_col = _c(60, 255, 140)
+        pygame.draw.line(self._screen, beam_col, (turret_x, turret_y), (right_x, portal_y), max(2, int(3 * sc)))
+        pygame.draw.line(self._screen, _c(255, 255, 255), (turret_x, turret_y), (right_x, portal_y), 1)
+
+        # Sparks around the hit portal
+        for k in range(4):
+            ang = t * 3.0 + k * (math.pi / 2)
+            sx = right_x + int(math.cos(ang) * (hex_r + 3 * sc))
+            sy = portal_y + int(math.sin(ang) * (hex_r + 3 * sc))
+            pygame.draw.circle(self._screen, _c(255, 235, 80), (sx, sy), max(1, int(2 * sc)))
+
+        # Turret dome
+        dome_r = max(5, int(9 * sc))
+        pygame.draw.circle(self._screen, _c(30, 50, 95), (turret_x, turret_y), dome_r)
+        pygame.draw.circle(self._screen, _c(0, 235, 255), (turret_x, turret_y), dome_r, max(1, int(2 * sc)))
+        pygame.draw.circle(self._screen, _c(255, 230, 75), (turret_x, turret_y), max(2, int(4 * sc)))
+
+    def _draw_villain_slicer_preview(self, area: pygame.Rect, dim: int) -> None:
+        """Render a mini cartoon villain + neon cyber slash preview."""
+        sc = self._sc
+        fade = dim / 255.0
+
+        def _c(r: int, g: int, b: int) -> Tuple[int, int, int]:
+            return (min(255, int(r * fade)), min(255, int(g * fade)), min(255, int(b * fade)))
+
+        cx, cy = area.centerx, area.centery
+        r = max(10, int(22 * sc))
+        pygame.draw.circle(self._screen, _c(140, 60, 220), (cx, cy), r)
+        pygame.draw.circle(self._screen, _c(255, 60, 140), (cx, cy), r, max(1, int(2 * sc)))
+        # Glowing eyes
+        pygame.draw.circle(self._screen, _c(255, 230, 50), (cx - int(7 * sc), cy - int(3 * sc)), max(2, int(3 * sc)))
+        pygame.draw.circle(self._screen, _c(255, 230, 50), (cx + int(7 * sc), cy - int(3 * sc)), max(2, int(3 * sc)))
+        # Diagonal plasma slash
+        pygame.draw.line(
+            self._screen, _c(0, 240, 255),
+            (area.left + int(area.width * 0.2), area.bottom - int(area.height * 0.2)),
+            (area.right - int(area.width * 0.2), area.top + int(area.height * 0.2)),
+            max(2, int(3 * sc)),
+        )
 
     def _draw_scratch_pad_preview(self, area: pygame.Rect, dim: int) -> None:
         sc = self._sc
@@ -639,8 +806,8 @@ class HomeScreen:
         sc = self._sc
         controls = [
             ("Sensor", "tilt to choose • flick to play"),
-            ("Mouse",  "hover to choose • click to play"),
-            ("Keys",   "← → to choose • Enter to play  •  F = fullscreen"),
+            ("Mouse",  "hover to choose • click to play  •  click Player to switch"),
+            ("Keys",   "← → to choose • Enter to play • U = switch user • F = fullscreen"),
             ("In-game", "L = Learn  •  T = Test  •  R = Regular mode"),
         ]
         y = self._card_y + self._card_h + max(18, int(30 * sc))

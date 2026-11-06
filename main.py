@@ -301,8 +301,9 @@ def main() -> None:
                 home._init_layout(cur)
 
             selected = home.run(gesture_src)
-            mode  = home.mode    # may have been toggled on the home screen
-            debug = home._debug  # preserve D-key toggle from home screen
+            mode     = home.mode       # may have been toggled on the home screen
+            debug    = home._debug     # preserve D-key toggle from home screen
+            username = home._username  # may have been switched on the home screen
 
             if selected == "quit":
                 break
@@ -310,7 +311,11 @@ def main() -> None:
             # Apply game-specific configuration overrides
             if hasattr(gesture_src, "config"):
                 if mode == "accessible":
-                    gesture_src.config = CONFIG_ACCESSIBLE_FLICK_STEER if selected == "snake" else CONFIG_ACCESSIBLE
+                    gesture_src.config = (
+                        CONFIG_ACCESSIBLE_FLICK_STEER
+                        if selected in ("snake", "math_choice")
+                        else CONFIG_ACCESSIBLE
+                    )
                 else:
                     gesture_src.config = CONFIG_STANDARD
 
