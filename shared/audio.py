@@ -308,11 +308,28 @@ class AudioManager:
     def play_collect(self) -> None:
         self._collect_sound.play()
 
+    def play_hit(self) -> None:
+        self._flick_cast_sound.play()
+
+    def play_game_over(self) -> None:
+        self._complete_fanfare_sound.play()
+
     def play_flick_cast(self) -> None:
         self._flick_cast_sound.play()
 
     def play_complete_fanfare(self) -> None:
         self._complete_fanfare_sound.play()
+
+    def play(self, sound_name: str) -> None:
+        """Generic sound dispatcher for game compatibility."""
+        if sound_name in ("powerup", "collect", "correct"):
+            self.play_collect()
+        elif sound_name in ("brick_hit", "hit", "wrong"):
+            self.play_hit()
+        elif sound_name in ("fanfare", "win", "game_over"):
+            self.play_complete_fanfare()
+        elif sound_name in ("flick", "cast"):
+            self.play_flick_cast()
 
 
 # ── Silent fallback ───────────────────────────────────────────────────────────
@@ -327,8 +344,11 @@ class _NullAudio:
     def play_success(self, u: str) -> None: pass
     def update(self) -> None: pass
     def play_collect(self)     -> None: pass
+    def play_hit(self)         -> None: pass
+    def play_game_over(self)   -> None: pass
     def play_flick_cast(self) -> None: pass
     def play_complete_fanfare(self) -> None: pass
+    def play(self, sound_name: str) -> None: pass
 
 
 def make_audio_manager():

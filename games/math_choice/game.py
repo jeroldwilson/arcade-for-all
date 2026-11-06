@@ -66,7 +66,8 @@ class MathChoiceGame:
     def handle_correct(self):
         self.score += 1
         self.streak += 1
-        self.audio.play("powerup")
+        if self.audio:
+            self.audio.play("powerup")
         self.feedback_text = "CORRECT!"
         self.feedback_color = (100, 255, 100)
         self.feedback_timer = 1.5
@@ -75,7 +76,8 @@ class MathChoiceGame:
 
     def handle_wrong(self):
         self.streak = 0
-        self.audio.play("brick_hit")
+        if self.audio:
+            self.audio.play("brick_hit")
         self.feedback_text = "TRY AGAIN!"
         self.feedback_color = (255, 100, 100)
         self.feedback_timer = 1.5

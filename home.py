@@ -37,10 +37,15 @@ TEXT_CLR   = (255, 255, 255)
 DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
-# ── Game metadata ─────────────────────────────────────────────────────────────
-GAMES = ["bricks", "snake", "fruit_ninja", "scratch_pad", "math_choice"]   # calibration & magic_wand added dynamically
+GAMES = ["villain_slicer", "fruit_ninja", "bricks", "snake", "scratch_pad", "math_choice"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
+    "villain_slicer": {
+        "title":   "VILLAIN SLICER",
+        "desc":    ["Slice cartoon villains!", "Cyber sword gesture slashes.", "Flick up for Omega Slash!"],
+        "desc_ac": ["Slice cartoon villains!", "Dwell or slice to defeat!", "Flick up for Super Strike!"],
+        "accent":  (255, 60, 140),
+    },
     "fruit_ninja": {
         "title":   "FRUIT SLICE",
         "desc":    ["Slice flying fruits!", "Tilt & flick to swing blade.", "60 seconds, beat your score!"],
