@@ -322,7 +322,7 @@ def main() -> None:
                 game = game_cls(cur, clock, debug=debug, mode=mode, audio=audio,
                                 username=username)
                 result = game.run(gesture_src)
-                debug = game._debug
+                debug = getattr(game, "_debug", getattr(game, "debug", debug))
                 if result == "quit":
                     break
 

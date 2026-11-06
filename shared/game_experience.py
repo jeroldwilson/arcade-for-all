@@ -348,8 +348,25 @@ class InactivityMonitor:
         self._pulse_interval      = _cfg.pulse_interval_sec
 
         self.woke_up              = False
+        self._led_blinking        = False
+        self._pulse_count         = 0
+        self._max_pulses          = 3
         self._font: Optional[pygame.font.Font] = None
         self._small_font: Optional[pygame.font.Font] = None
+
+    def _stop_blinking(self) -> None:
+        if self._led_blinking:
+            self._led_blinking = False
+            if self.sensor:
+                self.sensor.set_ambient_light(on=True, color=0, blink=False)
+
+    def cleanup(self) -> None:
+        """Reset inactivity state and restore steady LED when leaving a game."""
+        self.woke_up = False
+        self.is_paused = False
+        self.message = ""
+        self._pulse_count = 0
+        self._stop_blinking()
 
     def _ensure_fonts(self) -> None:
         if self._font is None:
@@ -361,30 +378,27 @@ class InactivityMonitor:
         if is_manually_paused:
             self.last_motion_time = now
             self.message          = ""
+            self._pulse_count     = 0
+            self._stop_blinking()
             return None
         if is_moving:
             self.last_motion_time = now
+            self._pulse_count     = 0
+            self._stop_blinking()
             if self.is_paused:
                 self.is_paused = False
                 self.message   = ""
-                if self.sensor:
-                    self.sensor.set_ambient_light(on=False)
                 return "RESUME"
             if self.woke_up:
-                # Keep the wake up message on screen for at least 10 seconds
-                if now - getattr(self, "wake_up_trigger_time", 0.0) >= 10.0:
-                    self.woke_up = False
-                    self.message = ""
-                    if self.sensor:
-                        self.sensor.set_ambient_light(on=False)
+                self.woke_up = False
+                self.message = ""
             return None
         inactive_dur = now - self.last_motion_time
         if inactive_dur > self.pause_threshold:
             if not self.is_paused:
                 self.is_paused = True
                 self.message   = "PAUSED — MAKE A MOVE TO RESUME"
-                if self.sensor:
-                    self.sensor.set_ambient_light(on=False)
+                self._stop_blinking()
                 return "PAUSE"
         elif inactive_dur > self.inactivity_threshold and not self.is_paused:
             if not self.woke_up:
@@ -398,9 +412,13 @@ class InactivityMonitor:
 
             if now - self.last_pulse_time > self._pulse_interval:
                 self.last_pulse_time = now
-                if self.sensor:
-                    self.sensor.vibrate(0.3)
+                if self.sensor and self._pulse_count < self._max_pulses:
+                    self._pulse_count += 1
+                    self.sensor.vibrate(0.2)
                     self.sensor.set_ambient_light(on=True, color=random.choice([0, 1, 2]), blink=True)
+                    self._led_blinking = True
+                elif self._pulse_count >= self._max_pulses and self._led_blinking:
+                    self._stop_blinking()
                 messages = [
                     f"Come on {self.username}, you can do it!",
                     f"Keep going {self.username}!",

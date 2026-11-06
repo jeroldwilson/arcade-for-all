@@ -589,6 +589,7 @@ class FruitNinjaGame:
             else:
                 result = self._handle_events()
                 if result:
+                    self._inactivity.cleanup()
                     if self._learner is not None:
                         self._learner.save_and_train()
                     if self._audio:
@@ -600,13 +601,28 @@ class FruitNinjaGame:
 
                 # Update Inactivity
                 gs = self._gesture_src.get_state() if self._gesture_src else None
-                is_moving = self._moving
-                if gs is not None and self._paused:
+                is_moving = self._moving or (getattr(self, "_actual_mag", 0.0) > 0.5)
+                if gs is not None and gs.calibrated and not getattr(gs, "sensor_disconnected", False):
                     gyro_mag = math.hypot(gs.abs_gz, gs.abs_gy)
-                    visible_thresh = 8.0 # GYRO_VISIBLE_ACC
-                    is_moving = (gyro_mag >= visible_thresh) or gs.launch
+                    visible_thresh = 8.0  # GYRO_VISIBLE_ACC
+                    is_moving = (
+                        is_moving
+                        or (gyro_mag >= visible_thresh)
+                        or gs.launch
+                        or abs(gs.paddle_velocity) > 0.08
+                        or abs(gs.tilt_y) > 0.08
+                    )
 
-                is_manually_paused = self._paused and not self._inactivity.is_paused
+                sensor_not_ready = (
+                    gs is not None
+                    and getattr(self._gesture_src, "_sensor", None) is not None
+                    and (not gs.calibrated or getattr(gs, "sensor_disconnected", False))
+                )
+                is_manually_paused = (
+                    (self._paused and not self._inactivity.is_paused)
+                    or self._game_over
+                    or sensor_not_ready
+                )
 
                 action = self._inactivity.update(is_moving, is_manually_paused)
                 if action == "PAUSE":
