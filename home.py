@@ -90,8 +90,8 @@ GAME_META = {
     },
     "math_choice": {
         "title":   "CYBER MATH",
-        "desc":    ["Blast neon answer portals!", "Move, swipe, or tilt toward answer.", "Voice TTS & Boss Mecha rounds!"],
-        "desc_ac": ["Blast neon answer portals!", "Move or wave toward the answer!", "Voice reads numbers & cheers you!"],
+        "desc":    ["Lvl 1: Math • Lvl 2: Algebra!", "Auto level-up on streak!", "Voice reads numbers & cheers you!"],
+        "desc_ac": ["Lvl 1: Math • Lvl 2: Algebra!", "Move or wave toward answer!", "Voice reads equations aloud!"],
         "accent":  (0, 235, 255),
     },
 }

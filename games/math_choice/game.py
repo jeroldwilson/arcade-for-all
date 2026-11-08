@@ -42,7 +42,6 @@ from shared.game_experience import (
     GameExitAppreciationScreen,
     NebulaBg,
     StarField,
-    make_glow,
 )
 
 
@@ -181,7 +180,100 @@ RANKS = [
     (2000, "QUANTUM LEGEND",   NEON_MAGENTA),
 ]
 
+LEVEL_NAMES = {
+    1: "LVL 1: FOUNDATION MATH",
+    2: "LVL 2: CYBER ALGEBRA",
+}
+
 OP_MODES = ["MIXED", "MULTIPLY (×)", "ADD & SUB (±)", "DIVIDE (÷)"]
+
+
+# ── Middle School Algebra Generator ───────────────────────────────────────────
+
+def generate_algebra_problem(boss: bool = False, accessible: bool = True) -> Tuple[str, str, int, List[int]]:
+    """
+    Generates middle school linear algebra equations with clean, positive whole number solutions.
+    Returns: (display_str, spoken_str, answer_val, valid_offset_distractors)
+    """
+    offsets = [-2, 2, -1, 1, 3, -3, 4, -4]
+
+    if boss:
+        boss_type = random.choice(["distributive", "both_sides", "two_step_sub"])
+        if boss_type == "distributive":
+            # a(x + b) = c
+            a = random.randint(2, 4)
+            b = random.randint(1, 5)
+            x = random.randint(2, 8)
+            c = a * (x + b)
+            return f"{a}(x + {b}) = {c}", f"{a} times parentheses x plus {b} equals {c}", x, offsets
+        elif boss_type == "both_sides":
+            # a*x + b = x + c  -->  (a-1)x = c - b
+            a = random.randint(2, 3)
+            x = random.randint(2, 7)
+            b = random.randint(1, 8)
+            c = (a - 1) * x + b
+            return f"{a}x + {b} = x + {c}", f"{a} x plus {b} equals x plus {c}", x, offsets
+        else:
+            # 2-step with larger coefficients
+            a = random.randint(4, 7)
+            x = random.randint(3, 9)
+            b = random.randint(2, 14)
+            c = a * x - b
+            return f"{a}x − {b} = {c}", f"{a} x minus {b} equals {c}", x, offsets
+
+    # Standard middle school problem types
+    cat = random.choice([
+        "add_one_step",
+        "sub_one_step",
+        "mul_one_step",
+        "div_one_step",
+        "two_step_add",
+        "two_step_sub",
+    ])
+
+    if cat == "add_one_step":
+        # x + b = c
+        x = random.randint(2, 12 if accessible else 16)
+        b = random.randint(2, 14)
+        c = x + b
+        return f"x + {b} = {c}", f"x plus {b} equals {c}", x, offsets
+
+    elif cat == "sub_one_step":
+        # x - b = c
+        x = random.randint(5, 15 if accessible else 20)
+        b = random.randint(2, 9)
+        c = x - b
+        return f"x − {b} = {c}", f"x minus {b} equals {c}", x, offsets
+
+    elif cat == "mul_one_step":
+        # a*x = c
+        a = random.randint(2, 7 if accessible else 9)
+        x = random.randint(2, 9 if accessible else 12)
+        c = a * x
+        return f"{a}x = {c}", f"{a} x equals {c}", x, offsets
+
+    elif cat == "div_one_step":
+        # x / a = b
+        a = random.randint(2, 5)
+        b = random.randint(2, 7)
+        x = a * b
+        return f"x ÷ {a} = {b}", f"x divided by {a} equals {b}", x, offsets
+
+    elif cat == "two_step_add":
+        # a*x + b = c
+        a = random.randint(2, 4 if accessible else 5)
+        x = random.randint(2, 8 if accessible else 10)
+        b = random.randint(1, 10)
+        c = a * x + b
+        return f"{a}x + {b} = {c}", f"{a} x plus {b} equals {c}", x, offsets
+
+    else:  # two_step_sub
+        # a*x - b = c
+        a = random.randint(2, 4 if accessible else 5)
+        x = random.randint(3, 8 if accessible else 10)
+        b = random.randint(1, 8)
+        c = a * x - b
+        return f"{a}x − {b} = {c}", f"{a} x minus {b} equals {c}", x, offsets
 
 
 # ── Main Game Class ───────────────────────────────────────────────────────────
@@ -215,6 +307,14 @@ class MathChoiceGame:
         self._last_celebrated_score = 0
         self._celebration: Optional[FireworksCelebration] = None
         self._op_mode_idx = 0  # 0=MIXED, 1=MUL, 2=ADD/SUB, 3=DIV
+
+        # Two-Level Curriculum & Dynamic Progression
+        # Level 1: Foundation Math (arithmetic mental math)
+        # Level 2: Middle School Cyber Algebra (linear equations: find x)
+        self.level = 1
+        self.level1_streak = 0
+        self.level2_misses = 0
+        self.level_up_threshold = 4 if self.mode == "accessible" else 5
 
         # Tremor smoothing buffers for gyro movement (8-frame window for calmer response)
         self._gz_hist: deque = deque(maxlen=8)
@@ -289,21 +389,22 @@ class MathChoiceGame:
         sc = self.sc
 
         # Scalable typography
-        self.font_hud = self._make_font(int(20 * sc), bold=True)
-        self.font_small = self._make_font(int(15 * sc), bold=True)
-        self.font_badge = self._make_font(int(17 * sc), bold=True)
-        self.font_title = self._make_font(int(44 * sc), bold=True)
-        self.font_problem = self._make_font(int(82 * sc), bold=True)
-        self.font_answer = self._make_font(int(96 * sc), bold=True)
-        self.font_feedback = self._make_font(int(36 * sc), bold=True)
-        self.font_feedback_sub = self._make_font(int(23 * sc), bold=True)
+        self.font_hud = self._make_font(int(19 * sc), bold=True)
+        self.font_small = self._make_font(int(14 * sc), bold=True)
+        self.font_badge = self._make_font(int(16 * sc), bold=True)
+        self.font_title = self._make_font(int(42 * sc), bold=True)
+        self.font_problem = self._make_font(int(72 * sc), bold=True)
+        self.font_answer = self._make_font(int(82 * sc), bold=True)
+        self.font_algebra_ans = self._make_font(int(52 * sc), bold=True)
+        self.font_feedback = self._make_font(int(34 * sc), bold=True)
+        self.font_feedback_sub = self._make_font(int(21 * sc), bold=True)
 
-        # Key anchor positions
+        # Key anchor positions (with generous vertical breathing room)
         self.core_center = (self.W // 2, int(self.H * 0.25))
-        self.left_portal = (int(self.W * 0.23), int(self.H * 0.57))
-        self.right_portal = (int(self.W * 0.77), int(self.H * 0.57))
-        self.portal_radius = int(96 * sc)
-        self.turret_pos = (self.W // 2, int(self.H * 0.88))
+        self.left_portal = (int(self.W * 0.23), int(self.H * 0.56))
+        self.right_portal = (int(self.W * 0.77), int(self.H * 0.56))
+        self.portal_radius = int(88 * sc)
+        self.turret_pos = (self.W // 2, int(self.H * 0.90))
 
         # Keep cursor inside new bounds
         if hasattr(self, "cursor_x"):
@@ -344,57 +445,62 @@ class MathChoiceGame:
                 "OMEGA MECHA-DRONE", "QUANTUM TITAN", "CYBER OVERLORD", "NOVA SENTINEL"
             ])
 
-        # Determine math operation
-        op_mode = OP_MODES[self._op_mode_idx]
-        if op_mode == "MULTIPLY (×)":
-            op = "mul"
-        elif op_mode == "ADD & SUB (±)":
-            op = random.choice(["add", "sub"])
-        elif op_mode == "DIVIDE (÷)":
-            op = "div"
+        if self.level == 2:
+            # ── LEVEL 2: MIDDLE SCHOOL CYBER ALGEBRA (Solve for x) ───────────
+            self.problem_text, self.spoken_problem, self.correct_answer, offsets = (
+                generate_algebra_problem(boss=self.is_boss_round, accessible=(self.mode == "accessible"))
+            )
         else:
-            # MIXED: weighted toward multiplication & engaging teen mental math
-            weights = ["mul", "mul", "add", "sub", "div"]
-            if self.is_boss_round:
-                weights.append("square")
-            op = random.choice(weights)
+            # ── LEVEL 1: FOUNDATION ARITHMETIC (Mental Math) ─────────────────
+            op_mode = OP_MODES[self._op_mode_idx]
+            if op_mode == "MULTIPLY (×)":
+                op = "mul"
+            elif op_mode == "ADD & SUB (±)":
+                op = random.choice(["add", "sub"])
+            elif op_mode == "DIVIDE (÷)":
+                op = "div"
+            else:
+                weights = ["mul", "mul", "add", "sub", "div"]
+                if self.is_boss_round:
+                    weights.append("square")
+                op = random.choice(weights)
 
-        if op == "mul":
-            max_f = 9 if self.mode == "accessible" and self.streak < 4 else 12
-            a = random.randint(2, max_f)
-            b = random.randint(2, max_f)
-            self.correct_answer = a * b
-            self.problem_text = f"{a} × {b}"
-            self.spoken_problem = f"{a} times {b}"
-            offsets = [-a, a, -b, b, -2, 2, -1, 1, 10, -10]
-        elif op == "add":
-            a = random.randint(12, 65)
-            b = random.randint(11, 55)
-            self.correct_answer = a + b
-            self.problem_text = f"{a} + {b}"
-            self.spoken_problem = f"{a} plus {b}"
-            offsets = [-10, 10, -2, 2, -1, 1, -5, 5]
-        elif op == "sub":
-            a = random.randint(25, 95)
-            b = random.randint(8, a - 5)
-            self.correct_answer = a - b
-            self.problem_text = f"{a} − {b}"
-            self.spoken_problem = f"{a} minus {b}"
-            offsets = [-10, 10, -2, 2, -1, 1, -4, 4]
-        elif op == "div":
-            b = random.randint(2, 10)
-            q = random.randint(2, 11)
-            a = b * q
-            self.correct_answer = q
-            self.problem_text = f"{a} ÷ {b}"
-            self.spoken_problem = f"{a} divided by {b}"
-            offsets = [-2, -1, 1, 2, 3, -3]
-        else:  # square bonus
-            a = random.randint(4, 12)
-            self.correct_answer = a * a
-            self.problem_text = f"{a}²"
-            self.spoken_problem = f"{a} squared"
-            offsets = [-a, a, -2, 2, 10, -10]
+            if op == "mul":
+                max_f = 9 if self.mode == "accessible" and self.streak < 4 else 12
+                a = random.randint(2, max_f)
+                b = random.randint(2, max_f)
+                self.correct_answer = a * b
+                self.problem_text = f"{a} × {b}"
+                self.spoken_problem = f"{a} times {b}"
+                offsets = [-a, a, -b, b, -2, 2, -1, 1, 10, -10]
+            elif op == "add":
+                a = random.randint(12, 65)
+                b = random.randint(11, 55)
+                self.correct_answer = a + b
+                self.problem_text = f"{a} + {b}"
+                self.spoken_problem = f"{a} plus {b}"
+                offsets = [-10, 10, -2, 2, -1, 1, -5, 5]
+            elif op == "sub":
+                a = random.randint(25, 95)
+                b = random.randint(8, a - 5)
+                self.correct_answer = a - b
+                self.problem_text = f"{a} − {b}"
+                self.spoken_problem = f"{a} minus {b}"
+                offsets = [-10, 10, -2, 2, -1, 1, -4, 4]
+            elif op == "div":
+                b = random.randint(2, 10)
+                q = random.randint(2, 11)
+                a = b * q
+                self.correct_answer = q
+                self.problem_text = f"{a} ÷ {b}"
+                self.spoken_problem = f"{a} divided by {b}"
+                offsets = [-2, -1, 1, 2, 3, -3]
+            else:  # square bonus
+                a = random.randint(4, 12)
+                self.correct_answer = a * a
+                self.problem_text = f"{a}²"
+                self.spoken_problem = f"{a} squared"
+                offsets = [-a, a, -2, 2, 10, -10]
 
         # Pick a plausible distractor answer
         valid_offsets = [o for o in offsets if self.correct_answer + o > 0 and o != 0]
@@ -413,10 +519,16 @@ class MathChoiceGame:
     def speak_current_problem(self) -> None:
         """Read the current math problem and the Left/Right options aloud via TTS."""
         prefix = f"Boss Round! " if self.is_boss_round else ""
-        msg = (
-            f"{prefix}What is {self.spoken_problem}? "
-            f"Left is {self.left_ans}. Right is {self.right_ans}."
-        )
+        if self.level == 2:
+            msg = (
+                f"{prefix}Solve for x: {self.spoken_problem}. "
+                f"Is x equal to {self.left_ans}, or x equal to {self.right_ans}?"
+            )
+        else:
+            msg = (
+                f"{prefix}What is {self.spoken_problem}? "
+                f"Left is {self.left_ans}. Right is {self.right_ans}."
+            )
         self.tts.speak(msg, interrupt=True)
 
     # ── Answer Evaluation & Personalized Appreciation / Motivation ────────────
@@ -424,7 +536,6 @@ class MathChoiceGame:
     def check_answer(self, side: str) -> None:
         if self.feedback_timer > 0:
             return
-        # If this wrong side was already tried on this question, ignore repeat trigger
         if self._wrong_side_eliminated == side:
             return
 
@@ -443,7 +554,8 @@ class MathChoiceGame:
 
         mult = min(4, 1 + (self.streak - 1) // 3)
         boss_bonus = 2 if self.is_boss_round else 1
-        pts = 100 * mult * boss_bonus
+        level_bonus = 1.5 if self.level == 2 else 1.0
+        pts = int(100 * mult * boss_bonus * level_bonus)
         self.score += pts
 
         if self.audio:
@@ -469,53 +581,87 @@ class MathChoiceGame:
             NEON_YELLOW
         ))
 
-        # Personalized appreciation messages with username
+        # Check automatic level progression:
+        # If user continuously performs well on Level 1, unlock Middle School Algebra!
+        level_up_occurred = False
         name = self.display_name
-        praise_templates = [
-            (
-                f"AWESOME JOB, {name.upper()}!",
-                f"{self.problem_text} = {self.correct_answer}  •  Streak x{self.streak}!",
-                f"Awesome job, {name}! {self.spoken_problem} is {self.correct_answer}!"
-            ),
-            (
-                f"YOU CRUSHED IT, {name.upper()}!",
-                f"Spot on! {self.problem_text} = {self.correct_answer}",
-                f"You crushed it, {name}! {self.correct_answer} is spot on!"
-            ),
-            (
-                f"BRILLIANT MOVE, {name.upper()}!",
-                f"Direct hit! {self.problem_text} = {self.correct_answer}",
-                f"Brilliant move, {name}! {self.spoken_problem} equals {self.correct_answer}!"
-            ),
-            (
-                f"UNSTOPPABLE, {name.upper()}!",
-                f"{self.streak} in a row! {self.problem_text} = {self.correct_answer}",
-                f"Unstoppable, {name}! That's {self.streak} in a row! {self.correct_answer} is right!"
-            ),
-            (
-                f"LEGENDARY SKILL, {name.upper()}!",
-                f"Cyber Core Charged! {self.problem_text} = {self.correct_answer}",
-                f"Legendary skill, {name}! {self.spoken_problem} is {self.correct_answer}!"
-            ),
-        ]
-        headline, subtext, spoken = random.choice(praise_templates)
+
+        if self.level == 1:
+            self.level1_streak += 1
+            if self.level1_streak >= self.level_up_threshold:
+                self.level = 2
+                self.level1_streak = 0
+                self.level2_misses = 0
+                level_up_occurred = True
+                self._celebration = FireworksCelebration(self.W, self.H, self.display_name, self.score)
+                self._spawn_explosion(self.W // 2, int(self.H * 0.45), NEON_MAGENTA, count=65)
+        else:
+            self.level2_misses = 0
+
+        # Personalized appreciation messages with username
+        if level_up_occurred:
+            headline = f"★ LEVEL UP: CYBER ALGEBRA UNLOCKED! ★"
+            subtext = f"{name.upper()} solved {self.level_up_threshold} in a row! Advancing to Middle School Algebra!"
+            spoken = f"Level Up, {name}! You unlocked Middle School Cyber Algebra! Solve for x!"
+        elif self.level == 2:
+            praise_templates = [
+                (
+                    f"EQUATION SOLVED, {name.upper()}!",
+                    f"{self.problem_text}  •  x = {self.correct_answer} is spot on!",
+                    f"Equation solved, {name}! x equals {self.correct_answer} is right!"
+                ),
+                (
+                    f"BRILLIANT ALGEBRA, {name.upper()}!",
+                    f"Direct hit! x = {self.correct_answer}",
+                    f"Brilliant algebra, {name}! x equals {self.correct_answer}!"
+                ),
+                (
+                    f"QUANTUM THINKING, {name.upper()}!",
+                    f"{self.problem_text}  •  x = {self.correct_answer}!",
+                    f"Quantum thinking, {name}! You found x!"
+                ),
+            ]
+            headline, subtext, spoken = random.choice(praise_templates)
+        else:
+            praise_templates = [
+                (
+                    f"AWESOME JOB, {name.upper()}!",
+                    f"{self.problem_text} = {self.correct_answer}  •  Streak x{self.streak}!",
+                    f"Awesome job, {name}! {self.spoken_problem} is {self.correct_answer}!"
+                ),
+                (
+                    f"YOU CRUSHED IT, {name.upper()}!",
+                    f"Spot on! {self.problem_text} = {self.correct_answer}",
+                    f"You crushed it, {name}! {self.correct_answer} is spot on!"
+                ),
+                (
+                    f"BRILLIANT MOVE, {name.upper()}!",
+                    f"Direct hit! {self.problem_text} = {self.correct_answer}",
+                    f"Brilliant move, {name}! {self.spoken_problem} equals {self.correct_answer}!"
+                ),
+                (
+                    f"UNSTOPPABLE, {name.upper()}!",
+                    f"{self.streak} in a row! {self.problem_text} = {self.correct_answer}",
+                    f"Unstoppable, {name}! That's {self.streak} in a row! {self.correct_answer} is right!"
+                ),
+            ]
+            headline, subtext, spoken = random.choice(praise_templates)
 
         self.feedback_type = "correct"
         self.feedback_headline = headline
         self.feedback_subtext = subtext
         self.feedback_color = NEON_GREEN
-        self.feedback_timer = 2.1
+        self.feedback_timer = 2.4 if level_up_occurred else 2.1
         self._pending_new_problem = True
         self.dwell_timer = 0.0
         self.dwell_side = None
 
-        # Speak personalized appreciation
         self.tts.speak(spoken, interrupt=True)
 
         # Check 1000-point milestone fireworks
         cur_ms = self.score // 1000
         last_ms = self._last_celebrated_score // 1000
-        if cur_ms > last_ms and self.score > 0:
+        if cur_ms > last_ms and self.score > 0 and not level_up_occurred:
             self._celebration = FireworksCelebration(self.W, self.H, self.display_name, cur_ms * 1000)
             self._last_celebrated_score = self.score
 
@@ -524,7 +670,6 @@ class MathChoiceGame:
         if self.audio:
             self.audio.play("brick_hit")
 
-        # Visual shield deflection on the wrong portal (keeps the problem active!)
         self._wrong_side_eliminated = side
         self._laser = LaserBeam(
             self.turret_pos[0], self.turret_pos[1] - int(20 * self.sc),
@@ -537,41 +682,57 @@ class MathChoiceGame:
         other_side = "right" if side == "left" else "left"
         name = self.display_name
 
-        # Supportive, motivating messages with username (never discouraging!)
-        encourage_templates = [
-            (
-                f"NICE TRY, {name.upper()}! YOU'VE GOT THIS!",
-                f"Move toward the {other_side.upper()} portal ({self.correct_answer}) to crack {self.problem_text}!",
-                f"Nice try, {name}! You've got this! Move {other_side} for {self.correct_answer}!"
-            ),
-            (
-                f"GOOD EFFORT, {name.upper()}! KEEP GOING!",
-                f"Almost there! Aim {other_side.upper()} to blast {self.correct_answer}!",
-                f"Good effort, {name}! Almost there, move {other_side} for {self.correct_answer}!"
-            ),
-            (
-                f"DON'T GIVE UP, {name.upper()}!",
-                f"Every try builds your power! Swing {other_side.upper()} for {self.correct_answer}!",
-                f"Don't give up, {name}! Swing {other_side} to hit {self.correct_answer}!"
-            ),
-            (
-                f"SO CLOSE, {name.upper()}! TRY THE OTHER SIDE!",
-                f"{self.problem_text} = {self.correct_answer}  •  Move {other_side.upper()} to lock it in!",
-                f"So close, {name}! {self.spoken_problem} is {self.correct_answer}. Move {other_side}!"
-            ),
-        ]
+        if self.level == 2:
+            self.level2_misses += 1
+            if self.level2_misses >= 3:
+                # Fall back to Foundation Math to recharge confidence
+                self.level = 1
+                self.level1_streak = 0
+                self.level2_misses = 0
+                self._popups.append(FloatingPopup(
+                    self.W // 2, int(self.H * 0.42), "RECHARGING IN FOUNDATION MATH!", NEON_YELLOW
+                ))
+
+            ans_hint = f"x = {self.correct_answer}"
+            encourage_templates = [
+                (
+                    f"NICE TRY, {name.upper()}! YOU'VE GOT THIS!",
+                    f"In {self.problem_text}, {ans_hint}  •  Move {other_side.upper()}!",
+                    f"Nice try, {name}! In {self.spoken_problem}, x is {self.correct_answer}. Move {other_side}!"
+                ),
+                (
+                    f"SO CLOSE, {name.upper()}! TRY {other_side.upper()}!",
+                    f"Aim {other_side.upper()} to lock in {ans_hint}!",
+                    f"So close, {name}! Move {other_side} for x equals {self.correct_answer}!"
+                ),
+            ]
+        else:
+            self.level1_streak = 0
+            ans_hint = str(self.correct_answer)
+            encourage_templates = [
+                (
+                    f"NICE TRY, {name.upper()}! YOU'VE GOT THIS!",
+                    f"Move toward {other_side.upper()} ({ans_hint}) to solve {self.problem_text}!",
+                    f"Nice try, {name}! You've got this! Move {other_side} for {ans_hint}!"
+                ),
+                (
+                    f"SO CLOSE, {name.upper()}! TRY THE OTHER SIDE!",
+                    f"{self.problem_text} = {ans_hint}  •  Move {other_side.upper()} to lock it in!",
+                    f"So close, {name}! {self.spoken_problem} is {ans_hint}. Move {other_side}!"
+                ),
+            ]
+
         headline, subtext, spoken = random.choice(encourage_templates)
 
         self.feedback_type = "wrong"
         self.feedback_headline = headline
         self.feedback_subtext = subtext
         self.feedback_color = NEON_YELLOW
-        self.feedback_timer = 1.6
+        self.feedback_timer = 1.8
         self._pending_new_problem = False
         self.dwell_timer = 0.0
         self.dwell_side = None
 
-        # Speak supportive motivation with username
         self.tts.speak(spoken, interrupt=True)
 
     # ── Particle & Shockwave Spawners ─────────────────────────────────────────
@@ -834,6 +995,17 @@ class MathChoiceGame:
                         # Cycle math operation mode (Mixed / Multiply / Add-Sub / Divide)
                         self._op_mode_idx = (self._op_mode_idx + 1) % len(OP_MODES)
                         self.generate_problem(speak_now=True)
+                    elif event.key == pygame.K_l:
+                        # Toggle curriculum Level 1 (Foundation Math) vs Level 2 (Cyber Algebra)
+                        self.level = 2 if self.level == 1 else 1
+                        self.level1_streak = 0
+                        self.level2_misses = 0
+                        lvl_name = "MIDDLE SCHOOL CYBER ALGEBRA" if self.level == 2 else "FOUNDATION MATH"
+                        self._popups.append(FloatingPopup(
+                            self.W // 2, int(self.H * 0.42), f"LEVEL: {lvl_name}!", NEON_YELLOW
+                        ))
+                        self.tts.speak(f"Level switched to {lvl_name}!", interrupt=True)
+                        self.generate_problem(speak_now=True)
                     elif event.key in (pygame.K_LEFT, pygame.K_a) and self.feedback_timer <= 0:
                         if self._wrong_side_eliminated != "left":
                             self.cursor_x = float(self.left_portal[0])
@@ -927,24 +1099,17 @@ class MathChoiceGame:
         ox = int(random.uniform(-self._screen_shake, self._screen_shake)) if self._screen_shake > 0 else 0
         oy = int(random.uniform(-self._screen_shake, self._screen_shake)) if self._screen_shake > 0 else 0
 
-        # 1. Deep Space + Nebula + 3D Perspective Cyber Grid
-        self._nebula.draw(self.screen)
+        # 1. Clean, pleasant Deep Aurora Space Background + Calm Horizon Floor
+        self._draw_pleasant_background(ox, oy)
         self._stars.draw(self.screen)
         self._draw_cyber_grid(ox, oy)
 
-        # 2. Central divider energy beam (subtle)
-        mid_x = self.W // 2 + ox
-        pygame.draw.line(
-            self.screen, (35, 55, 90),
-            (mid_x, int(self.H * 0.40)), (mid_x, int(self.H * 0.80)), max(1, int(2 * sc))
-        )
-
-        # 3. Draw Boss Mecha-Drone (if Boss Round) & Holographic Problem Reactor Core
+        # 2. Draw Boss Mecha-Drone (if Boss Round) & Clean Formula Card
         if self.is_boss_round:
             self._draw_boss_drone(self.core_center[0] + ox, int(self.H * 0.12) + oy)
         self._draw_problem_core(self.core_center[0] + ox, self.core_center[1] + oy)
 
-        # 4. Draw Left & Right Hexagonal Answer Portals
+        # 3. Draw Left & Right Hexagonal Answer Portals (with clear separation between geometry & numbers)
         self._draw_answer_portal(
             "left", self.left_portal[0] + ox, self.left_portal[1] + oy,
             self.left_ans, NEON_CYAN
@@ -954,29 +1119,29 @@ class MathChoiceGame:
             self.right_ans, NEON_MAGENTA
         )
 
-        # 5. Draw Aiming Line, Plasma Laser Beam, Reticle Trail, & Cyber Turret
+        # 4. Draw Aiming Line, Plasma Laser Beam, Reticle Trail, & Cyber Turret
         self._draw_turret_and_reticle(ox, oy)
 
-        # 6. Draw Shockwave Rings, Explosion Particles, & Floating Popups
+        # 5. Draw Shockwave Rings, Explosion Particles, & Floating Popups
         self._draw_effects(ox, oy)
 
-        # 7. Draw Personalized Feedback Banner (Success / Motivation with Username)
+        # 6. Draw Personalized Feedback Banner (Success / Motivation with Username)
         if self.feedback_timer > 0:
             self._draw_feedback_banner()
 
-        # 8. Draw Top Arcade HUD Bar (Score, Rank, Streak, Voice/Fullscreen Controls)
+        # 7. Draw Top Arcade HUD Bar (Score, Rank, Streak, Voice/Fullscreen Controls)
         self._draw_top_hud()
 
-        # 9. Milestone Fireworks Overlay
+        # 8. Milestone Fireworks Overlay
         if self._celebration is not None:
             self._celebration.draw(self.screen, self.font_title, self.font_feedback_sub)
 
-        # 10. 3D Hand Gesture Avatar HUD
+        # 9. 3D Hand Gesture Avatar HUD (tucked into bottom-right corner without overlapping labels)
         if gs is not None:
-            hud_margin = int(105 * sc)
+            hud_margin = int(88 * sc)
             self.hud.draw(self.screen, gs, self.W - hud_margin, self.H - hud_margin)
 
-        # 11. Debug overlay (D key)
+        # 10. Debug overlay (D key)
         if self.debug and gs is not None:
             dbg_txt = (
                 f"Input: {self._active_input_mode}  "
@@ -987,26 +1152,45 @@ class MathChoiceGame:
             ds = self.font_small.render(dbg_txt, True, NEON_GREEN)
             self.screen.blit(ds, (int(16 * sc), self.H - int(28 * sc)))
 
+    def _draw_pleasant_background(self, ox: int, oy: int) -> None:
+        """Render a calm, pleasant deep-space gradient with subtle ambient aurora bands."""
+        sc = self.sc
+        # Smooth vertical twilight-indigo gradient
+        bands = 18
+        band_h = (self.H // bands) + 2
+        for i in range(bands):
+            frac = i / max(1, bands - 1)
+            r = int(8 + 8 * frac)
+            g = int(12 + 16 * (1.0 - abs(frac - 0.45)))
+            b = int(26 + 26 * frac)
+            pygame.draw.rect(self.screen, (r, g, b), (0, i * (self.H // bands), self.W, band_h))
+
+        # Subtle, slow-breathing ambient rings behind the playfield (never opaque)
+        cx, cy = self.W // 2 + ox, int(self.H * 0.48) + oy
+        for idx, base_r in enumerate((190, 290, 390)):
+            rad = int((base_r + math.sin(self._anim_t * 0.8 + idx) * 8) * sc)
+            pygame.draw.circle(self.screen, (18, 30, 56), (cx, cy), rad, 1)
+
     def _draw_cyber_grid(self, ox: int, oy: int) -> None:
-        """Draw an animated 3D perspective neon synthwave horizon grid at the bottom."""
-        horizon_y = int(self.H * 0.74) + oy
+        """Draw a calm, low-clutter perspective horizon floor at the very bottom."""
+        horizon_y = int(self.H * 0.82) + oy
         bottom_y = self.H
-        grid_col = (28, 65, 115)
-        bright_col = (0, 160, 220)
+        grid_col = (22, 46, 82)
+        horizon_col = (38, 115, 165)
 
-        # Horizon glow line
-        pygame.draw.line(self.screen, bright_col, (0, horizon_y), (self.W, horizon_y), 2)
+        # Clean horizon line well below the portals and their labels
+        pygame.draw.line(self.screen, horizon_col, (0, horizon_y), (self.W, horizon_y), 1)
 
-        # Perspective radial lines fanning out from vanishing point
+        # Sparse radial perspective lines
         vx = self.W // 2 + ox
-        for i in range(-8, 9):
-            bx = vx + int(i * 115 * self.sc)
+        for i in range(-5, 6):
+            bx = vx + int(i * 155 * self.sc)
             pygame.draw.line(self.screen, grid_col, (vx, horizon_y), (bx, bottom_y), 1)
 
-        # Scrolling horizontal depth lines
+        # Gentle scrolling horizontal floor lines
         t_norm = (self._grid_scroll / 40.0)
-        for row in range(6):
-            frac = ((row + t_norm) / 6.0) ** 1.8
+        for row in range(4):
+            frac = ((row + t_norm) / 4.0) ** 1.7
             y = int(horizon_y + (bottom_y - horizon_y) * frac)
             pygame.draw.line(self.screen, grid_col, (0, y), (self.W, y), 1)
 
@@ -1057,53 +1241,72 @@ class MathChoiceGame:
         self.screen.blit(boss_lbl, boss_lbl.get_rect(center=(cx, cy - int(46 * sc))))
 
     def _draw_problem_core(self, cx: int, cy: int) -> None:
-        """Render the math problem inside a glowing sci-fi holographic reactor core."""
+        """Render the math formula inside a clean, high-contrast glass card with zero background bleed."""
         sc = self.sc
-        box_w = int(340 * sc)
-        box_h = int(125 * sc)
+        box_w = int(380 * sc)
+        box_h = int(124 * sc)
         rect = pygame.Rect(cx - box_w // 2, cy - box_h // 2, box_w, box_h)
 
         accent = NEON_MAGENTA if self.is_boss_round else NEON_CYAN
 
-        # Soft outer glow
-        glow = make_glow(int(110 * sc), accent, 75)
-        self.screen.blit(
-            glow,
-            (cx - glow.get_width() // 2, cy - glow.get_height() // 2),
-            special_flags=pygame.BLEND_RGBA_ADD,
-        )
+        # Soft outer rectangular halo rings (never a solid circle behind the formula!)
+        for pad_px, alpha in ((int(12 * sc), 24), (int(6 * sc), 48)):
+            halo_rect = pygame.Rect(
+                rect.left - pad_px,
+                rect.top - pad_px,
+                rect.width + pad_px * 2,
+                rect.height + pad_px * 2,
+            )
+            halo_surf = pygame.Surface((halo_rect.width, halo_rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(
+                halo_surf,
+                (*accent, alpha),
+                halo_surf.get_rect(),
+                border_radius=int((22 + pad_px) * sc),
+            )
+            self.screen.blit(halo_surf, halo_rect.topleft)
 
-        # Dark glassmorphic core panel
-        panel = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-        pygame.draw.rect(panel, (16, 26, 52, 225), panel.get_rect(), border_radius=int(22 * sc))
-        self.screen.blit(panel, rect.topleft)
-        pygame.draw.rect(self.screen, accent, rect, max(2, int(3 * sc)), border_radius=int(22 * sc))
+        # Solid deep-slate formula card so the equation is 100% crisp and isolated
+        pygame.draw.rect(self.screen, (14, 22, 44), rect, border_radius=int(20 * sc))
+        inner_rect = rect.inflate(-int(10 * sc), -int(10 * sc))
+        pygame.draw.rect(self.screen, (19, 30, 58), inner_rect, border_radius=int(15 * sc))
+        pygame.draw.rect(self.screen, accent, rect, max(2, int(3 * sc)), border_radius=int(20 * sc))
 
-        # Corner tech brackets
-        blen = int(22 * sc)
-        bw = max(2, int(4 * sc))
-        for bx, by, sx, sy in [
-            (rect.left - 4, rect.top - 4, 1, 1),
-            (rect.right + 4, rect.top - 4, -1, 1),
-            (rect.left - 4, rect.bottom + 4, 1, -1),
-            (rect.right + 4, rect.bottom + 4, -1, -1),
-        ]:
-            pygame.draw.line(self.screen, NEON_YELLOW, (bx, by), (bx + sx * blen, by), bw)
-            pygame.draw.line(self.screen, NEON_YELLOW, (bx, by), (bx, by + sy * blen), bw)
+        # Top pill header ("SOLVE FORMULA", "SOLVE FOR x", or "BOSS") well separated from numbers
+        if self.level == 2:
+            hdr_text = "★ BOSS ALGEBRA ★" if self.is_boss_round else "SOLVE FOR x"
+        else:
+            hdr_text = "★ BOSS FORMULA ★" if self.is_boss_round else "SOLVE FORMULA"
+        hdr_surf = self.font_small.render(hdr_text, True, accent)
+        hdr_w = hdr_surf.get_width() + int(24 * sc)
+        hdr_h = hdr_surf.get_height() + int(6 * sc)
+        hdr_rect = pygame.Rect(cx - hdr_w // 2, rect.top - hdr_h // 2, hdr_w, hdr_h)
+        pygame.draw.rect(self.screen, (12, 18, 36), hdr_rect, border_radius=int(10 * sc))
+        pygame.draw.rect(self.screen, accent, hdr_rect, 1, border_radius=int(10 * sc))
+        self.screen.blit(hdr_surf, hdr_surf.get_rect(center=hdr_rect.center))
 
-        # Display equation (show solved equation during correct celebration!)
-        display_eq = (
-            f"{self.problem_text} = {self.correct_answer}"
-            if (self.feedback_timer > 0 and self.feedback_type == "correct")
-            else self.problem_text
-        )
-        font_use = self.font_title if len(display_eq) > 7 else self.font_problem
-        eq_col = NEON_GREEN if (self.feedback_timer > 0 and self.feedback_type == "correct") else TEXT_WHITE
+        # Display clean formula (with "= ?" prompt while solving in Level 1, or solved equation)
+        is_solved = (self.feedback_timer > 0 and self.feedback_type == "correct")
+        if self.level == 2:
+            display_eq = (
+                f"{self.problem_text}  →  x = {self.correct_answer}"
+                if is_solved
+                else self.problem_text
+            )
+        else:
+            display_eq = (
+                f"{self.problem_text} = {self.correct_answer}"
+                if is_solved
+                else f"{self.problem_text} = ?"
+            )
+        font_use = self.font_title if len(display_eq) > 9 else self.font_problem
+        eq_col = NEON_GREEN if is_solved else TEXT_WHITE
 
-        shadow = font_use.render(display_eq, True, (0, 0, 0))
+        eq_cy = cy + int(6 * sc)
+        shadow = font_use.render(display_eq, True, (6, 10, 22))
         surf = font_use.render(display_eq, True, eq_col)
-        self.screen.blit(shadow, shadow.get_rect(center=(cx + 3, cy + 3)))
-        self.screen.blit(surf, surf.get_rect(center=(cx, cy)))
+        self.screen.blit(shadow, shadow.get_rect(center=(cx + 2, eq_cy + 3)))
+        self.screen.blit(surf, surf.get_rect(center=(cx, eq_cy)))
 
     def _draw_answer_portal(
         self,
@@ -1113,7 +1316,7 @@ class MathChoiceGame:
         answer_val: int,
         base_color: Tuple[int, int, int],
     ) -> None:
-        """Render a rotating hexagonal neon energy portal for an answer option."""
+        """Render a clean hexagonal geometric frame with an isolated dark inner medallion for the number."""
         sc = self.sc
         r = self.portal_radius
         is_hovered = (self.dwell_side == side and self.feedback_timer <= 0)
@@ -1125,29 +1328,31 @@ class MathChoiceGame:
         )
 
         if is_eliminated:
-            color = (75, 80, 100)
+            color = (75, 85, 105)
         elif is_correct_reveal or is_hovered:
             color = NEON_GREEN
         else:
             color = base_color
 
-        # Pulse scale when hovered
-        pulse = 1.0 + (0.06 * math.sin(self._anim_t * 8.0) if is_hovered else 0.02 * math.sin(self._anim_t * 3.0))
+        # Gentle breathing scale
+        pulse = 1.0 + (0.045 * math.sin(self._anim_t * 6.0) if is_hovered else 0.015 * math.sin(self._anim_t * 2.2))
         r_scaled = int(r * pulse)
 
-        # Radial glow behind portal
+        # Soft translucent outer aura (no harsh BLEND_RGBA_ADD washout!)
         if not is_eliminated:
-            glow_r = int(r_scaled * (1.45 if is_hovered else 1.2))
-            glow = make_glow(glow_r, color, 115 if is_hovered else 65)
-            self.screen.blit(
-                glow,
-                (cx - glow.get_width() // 2, cy - glow.get_height() // 2),
-                special_flags=pygame.BLEND_RGBA_ADD,
+            aura_r = r_scaled + int(14 * sc)
+            aura_surf = pygame.Surface((aura_r * 2 + 4, aura_r * 2 + 4), pygame.SRCALPHA)
+            pygame.draw.circle(
+                aura_surf,
+                (*color, 38 if is_hovered else 18),
+                (aura_r + 2, aura_r + 2),
+                aura_r,
             )
+            self.screen.blit(aura_surf, (cx - aura_r - 2, cy - aura_r - 2))
 
-        # Outer & inner counter-rotating hexagons
-        rot1 = self._anim_t * (1.2 if is_hovered else 0.45) * (1 if side == "left" else -1)
-        rot2 = -rot1 * 0.7
+        # Outer rotating geometric hexagon frame
+        rot1 = self._anim_t * (0.85 if is_hovered else 0.30) * (1 if side == "left" else -1)
+        rot2 = -rot1 * 0.65
         hex_outer = [
             (
                 int(cx + r_scaled * math.cos(rot1 + i * math.pi / 3)),
@@ -1155,52 +1360,66 @@ class MathChoiceGame:
             )
             for i in range(6)
         ]
-        hex_inner = [
+        hex_mid = [
             (
-                int(cx + (r_scaled * 0.84) * math.cos(rot2 + i * math.pi / 3)),
-                int(cy + (r_scaled * 0.84) * math.sin(rot2 + i * math.pi / 3)),
+                int(cx + (r_scaled * 0.88) * math.cos(rot2 + i * math.pi / 3)),
+                int(cy + (r_scaled * 0.88) * math.sin(rot2 + i * math.pi / 3)),
             )
             for i in range(6)
         ]
 
-        # Translucent portal core fill
+        # Subtle geometric ring fill between outer hex and inner medallion
         fill_surf = pygame.Surface((r_scaled * 2 + 8, r_scaled * 2 + 8), pygame.SRCALPHA)
         local_hex = [(px - (cx - r_scaled - 4), py - (cy - r_scaled - 4)) for px, py in hex_outer]
-        pygame.draw.polygon(fill_surf, (*color, 48 if not is_eliminated else 20), local_hex)
+        pygame.draw.polygon(fill_surf, (*color, 32 if not is_eliminated else 12), local_hex)
         self.screen.blit(fill_surf, (cx - r_scaled - 4, cy - r_scaled - 4))
 
-        pygame.draw.polygon(self.screen, color, hex_outer, max(2, int(4 * sc)))
-        pygame.draw.polygon(self.screen, (*color[:2], min(255, color[2] + 40)), hex_inner, max(1, int(2 * sc)))
+        # Crisp geometric hexagon outlines (kept strictly in the outer ring)
+        pygame.draw.polygon(self.screen, color, hex_outer, max(2, int(3 * sc)))
+        pygame.draw.polygon(self.screen, (*color[:2], min(255, color[2] + 35)), hex_mid, 1)
 
-        # Orbiting energy nodes on hex vertices
+        # Small vertex nodes on outer hexagon corners (away from the text)
         if not is_eliminated:
             for vx, vy in hex_outer[::2]:
-                pygame.draw.circle(self.screen, TEXT_WHITE, (vx, vy), max(3, int(5 * sc)))
-                pygame.draw.circle(self.screen, color, (vx, vy), max(5, int(8 * sc)), 1)
+                pygame.draw.circle(self.screen, color, (vx, vy), max(3, int(4 * sc)))
 
-        # Dwell Charge Ring (fills up smoothly as player holds reticle inside portal)
+        # Solid dark inner medallion circle: creates 100% clear separation between
+        # the rotating geometric lines and the answer number!
+        inner_r = int(r_scaled * 0.64)
+        pygame.draw.circle(self.screen, (13, 20, 40), (cx, cy), inner_r)
+        pygame.draw.circle(self.screen, color, (cx, cy), inner_r, max(1, int(2 * sc)))
+
+        # Dwell Charge Ring (fills smoothly around the outside when hovering)
         if is_hovered and self.dwell_timer > 0:
             prog = min(1.0, self.dwell_timer / self.dwell_required)
-            arc_r = r_scaled + int(14 * sc)
+            arc_r = r_scaled + int(12 * sc)
             arc_rect = pygame.Rect(cx - arc_r, cy - arc_r, arc_r * 2, arc_r * 2)
             pygame.draw.arc(
                 self.screen, NEON_GREEN, arc_rect,
-                math.pi / 2, math.pi / 2 + prog * math.tau, max(4, int(8 * sc))
+                math.pi / 2, math.pi / 2 + prog * math.tau, max(4, int(7 * sc))
             )
 
-        # Answer Number
-        num_col = (120, 125, 145) if is_eliminated else TEXT_WHITE
-        ans_shadow = self.font_answer.render(str(answer_val), True, (0, 0, 0))
-        ans_surf = self.font_answer.render(str(answer_val), True, num_col)
-        self.screen.blit(ans_shadow, ans_shadow.get_rect(center=(cx + 3, cy + 3)))
+        # Crisp Answer Number or x = Value inside the dark medallion
+        ans_str = f"x = {answer_val}" if self.level == 2 else str(answer_val)
+        num_col = (110, 120, 140) if is_eliminated else TEXT_WHITE
+        font_num = self.font_algebra_ans if self.level == 2 else self.font_answer
+        ans_shadow = font_num.render(ans_str, True, (5, 8, 18))
+        ans_surf = font_num.render(ans_str, True, num_col)
+        self.screen.blit(ans_shadow, ans_shadow.get_rect(center=(cx + 2, cy + 3)))
         self.screen.blit(ans_surf, ans_surf.get_rect(center=(cx, cy)))
 
-        # Directional gesture hint label below portal
-        dir_label = "« MOVE / SWIPE LEFT" if side == "left" else "MOVE / SWIPE RIGHT »"
+        # Pill-badged directional label well below the geometric portal
+        dir_label = "◀ SWIPE / MOVE LEFT" if side == "left" else "SWIPE / MOVE RIGHT ▶"
         if is_eliminated:
             dir_label = "TRY OTHER SIDE"
-        lbl_surf = self.font_badge.render(dir_label, True, color)
-        self.screen.blit(lbl_surf, lbl_surf.get_rect(center=(cx, cy + r_scaled + int(26 * sc))))
+        lbl_surf = self.font_small.render(dir_label, True, TEXT_WHITE if is_hovered else color)
+        lbl_y = cy + r_scaled + int(28 * sc)
+        pill_w = lbl_surf.get_width() + int(22 * sc)
+        pill_h = lbl_surf.get_height() + int(8 * sc)
+        pill_rect = pygame.Rect(cx - pill_w // 2, lbl_y - pill_h // 2, pill_w, pill_h)
+        pygame.draw.rect(self.screen, (12, 18, 36), pill_rect, border_radius=int(10 * sc))
+        pygame.draw.rect(self.screen, color, pill_rect, 1, border_radius=int(10 * sc))
+        self.screen.blit(lbl_surf, lbl_surf.get_rect(center=pill_rect.center))
 
     def _draw_turret_and_reticle(self, ox: int, oy: int) -> None:
         """Draw the player's bottom-center Cyber Plasma Cannon and the motion-controlled reticle."""
@@ -1254,24 +1473,21 @@ class MathChoiceGame:
         pygame.draw.circle(self.screen, NEON_CYAN, (tx, ty), base_r, max(2, int(3 * sc)))
         pygame.draw.circle(self.screen, NEON_YELLOW, (tx, ty), int(10 * sc))
 
-        # 5. Glowing Energy Reticle at cursor position
+        # 5. Glowing Energy Reticle at cursor position (clean ring, no solid blob)
         if self.feedback_timer <= 0:
             ret_col = NEON_GREEN if self.dwell_side else NEON_YELLOW
-            ret_r = int(22 * sc)
-            glow = make_glow(int(36 * sc), ret_col, 140)
-            self.screen.blit(
-                glow,
-                (rx - glow.get_width() // 2, ry - glow.get_height() // 2),
-                special_flags=pygame.BLEND_RGBA_ADD,
-            )
+            ret_r = int(20 * sc)
+            halo_surf = pygame.Surface((ret_r * 3, ret_r * 3), pygame.SRCALPHA)
+            pygame.draw.circle(halo_surf, (*ret_col, 42), (int(ret_r * 1.5), int(ret_r * 1.5)), int(ret_r * 1.35))
+            self.screen.blit(halo_surf, (rx - int(ret_r * 1.5), ry - int(ret_r * 1.5)))
             pygame.draw.circle(self.screen, ret_col, (rx, ry), ret_r, max(2, int(3 * sc)))
-            pygame.draw.circle(self.screen, TEXT_WHITE, (rx, ry), max(4, int(6 * sc)))
+            pygame.draw.circle(self.screen, TEXT_WHITE, (rx, ry), max(3, int(5 * sc)))
             # Crosshair ticks
-            ch = int(30 * sc)
-            pygame.draw.line(self.screen, ret_col, (rx - ch, ry), (rx - int(12 * sc), ry), 2)
-            pygame.draw.line(self.screen, ret_col, (rx + int(12 * sc), ry), (rx + ch, ry), 2)
-            pygame.draw.line(self.screen, ret_col, (rx, ry - ch), (rx, ry - int(12 * sc)), 2)
-            pygame.draw.line(self.screen, ret_col, (rx, ry + int(12 * sc)), (rx, ry + ch), 2)
+            ch = int(28 * sc)
+            pygame.draw.line(self.screen, ret_col, (rx - ch, ry), (rx - int(11 * sc), ry), 2)
+            pygame.draw.line(self.screen, ret_col, (rx + int(11 * sc), ry), (rx + ch, ry), 2)
+            pygame.draw.line(self.screen, ret_col, (rx, ry - ch), (rx, ry - int(11 * sc)), 2)
+            pygame.draw.line(self.screen, ret_col, (rx, ry + int(11 * sc)), (rx, ry + ch), 2)
 
     def _draw_effects(self, ox: int, oy: int) -> None:
         for r in self._rings:
@@ -1310,13 +1526,21 @@ class MathChoiceGame:
         sc = self.sc
         pad = int(16 * sc)
 
-        # Left: Score & Player Name
+        # Left: Score & Player Name & Level
         score_s = self.font_hud.render(f"SCORE: {self.score}", True, TEXT_WHITE)
         self.screen.blit(score_s, (pad, pad))
 
+        lvl_name = LEVEL_NAMES.get(self.level, "MATH")
+        lvl_col = NEON_MAGENTA if self.level == 2 else NEON_CYAN
+        lvl_info = f"{lvl_name} [L]"
+        if self.level == 1:
+            lvl_info += f"  ({self.level1_streak}/{self.level_up_threshold} to Algebra)"
+        lvl_s = self.font_small.render(lvl_info, True, lvl_col)
+        self.screen.blit(lvl_s, (pad, pad + int(24 * sc)))
+
         rank_name, rank_col = self._get_rank_info()
-        rank_s = self.font_small.render(f"PILOT: {self.display_name.upper()}  •  RANK: {rank_name}", True, rank_col)
-        self.screen.blit(rank_s, (pad, pad + int(26 * sc)))
+        rank_s = self.font_small.render(f"PILOT: {self.display_name.upper()}  •  {rank_name}", True, rank_col)
+        self.screen.blit(rank_s, (pad, pad + int(44 * sc)))
 
         # Center-Top: Streak & Operation Mode Badge
         if self.streak > 0:
@@ -1324,7 +1548,7 @@ class MathChoiceGame:
             streak_txt = f"STREAK: {self.streak}  (x{mult} OVERDRIVE)"
             st_col = NEON_YELLOW if self.streak < 5 else NEON_MAGENTA
         else:
-            streak_txt = f"MODE: {OP_MODES[self._op_mode_idx]} [O]"
+            streak_txt = f"MODE: {OP_MODES[self._op_mode_idx]} [O]" if self.level == 1 else "SOLVE FOR x"
             st_col = TEXT_DIM
         st_surf = self.font_badge.render(streak_txt, True, st_col)
         self.screen.blit(st_surf, st_surf.get_rect(center=(self.W // 2, pad + int(12 * sc))))
@@ -1335,7 +1559,7 @@ class MathChoiceGame:
         tts_surf = self.font_small.render(tts_lbl, True, tts_col)
         self.screen.blit(tts_surf, tts_surf.get_rect(right=self.W - pad, top=pad))
 
-        ctrl_lbl = "FULLSCREEN [F]  •  OPS [O]  •  MENU [ESC]"
+        ctrl_lbl = "LEVEL [L]  •  OPS [O]  •  FS [F]  •  ESC"
         ctrl_surf = self.font_small.render(ctrl_lbl, True, TEXT_DIM)
         self.screen.blit(ctrl_surf, ctrl_surf.get_rect(right=self.W - pad, top=pad + int(24 * sc)))
 
