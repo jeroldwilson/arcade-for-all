@@ -37,9 +37,15 @@ TEXT_CLR   = (255, 255, 255)
 DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
-GAMES = ["math_choice", "fruit_ninja", "bricks", "snake", "villain_slicer", "scratch_pad"]   # calibration & magic_wand added dynamically
+GAMES = ["youtube_tv", "math_choice", "fruit_ninja", "bricks", "snake", "villain_slicer", "scratch_pad"]   # calibration & magic_wand added dynamically
 
 GAME_META = {
+    "youtube_tv": {
+        "title":   "YOUTUBE TV",
+        "desc":    ["Watch YouTube on HDMI TV!", "Swipe Left/Right for videos.", "Parent URL setup, zero tokens!"],
+        "desc_ac": ["Watch YouTube independently!", "Swipe or tilt Left / Right!", "Voice announces every channel!"],
+        "accent":  (255, 70, 90),
+    },
     "villain_slicer": {
         "title":   "VILLAIN SLICER",
         "desc":    ["Slice cartoon villains!", "Cyber sword gesture slashes.", "Flick up for Omega Slash!"],
@@ -563,7 +569,9 @@ class HomeScreen:
         pygame.draw.rect(self._screen, (10, 10, 20), area, border_radius=6)
         dim = 180 if active else 100
 
-        if game_id == "math_choice":
+        if game_id == "youtube_tv":
+            self._draw_youtube_tv_preview(area, dim)
+        elif game_id == "math_choice":
             self._draw_math_choice_preview(area, dim)
         elif game_id == "bricks":
             self._draw_bricks_preview(area, dim)
@@ -577,6 +585,59 @@ class HomeScreen:
             self._draw_scratch_pad_preview(area, dim)
 
         self._screen.set_clip(prev_clip)
+
+    def _draw_youtube_tv_preview(self, area: pygame.Rect, dim: int) -> None:
+        """Render an animated HDMI TV + YouTube Play badge + Left/Right swipe wings."""
+        sc = self._sc
+        fade = dim / 255.0
+        t = pygame.time.get_ticks() / 1000.0
+
+        def _c(r: int, g: int, b: int) -> Tuple[int, int, int]:
+            return (
+                min(255, int(r * fade)),
+                min(255, int(g * fade)),
+                min(255, int(b * fade)),
+            )
+
+        cx, cy = area.centerx, area.centery - int(6 * sc)
+
+        # TV bezel frame
+        tv_w = int(area.width * 0.68)
+        tv_h = int(area.height * 0.56)
+        tv_rect = pygame.Rect(cx - tv_w // 2, cy - tv_h // 2, tv_w, tv_h)
+        pygame.draw.rect(self._screen, _c(20, 26, 48), tv_rect, border_radius=max(4, int(7 * sc)))
+        pygame.draw.rect(self._screen, _c(255, 70, 90), tv_rect, max(1, int(2 * sc)), border_radius=max(4, int(7 * sc)))
+
+        # Red YouTube play badge in center of TV
+        badge_w = max(24, int(38 * sc))
+        badge_h = max(16, int(26 * sc))
+        badge_rect = pygame.Rect(cx - badge_w // 2, cy - badge_h // 2, badge_w, badge_h)
+        pygame.draw.rect(self._screen, _c(235, 35, 55), badge_rect, border_radius=max(3, int(6 * sc)))
+        tri_r = max(4, int(7 * sc))
+        tri_pts = [
+            (cx - int(tri_r * 0.5), cy - tri_r),
+            (cx - int(tri_r * 0.5), cy + tri_r),
+            (cx + tri_r, cy),
+        ]
+        pygame.draw.polygon(self._screen, _c(255, 255, 255), tri_pts)
+
+        # Animated Left / Right swipe chevrons flanking the TV
+        pulse = 0.5 + 0.5 * math.sin(t * 3.5)
+        l_col = _c(0, int(180 + 75 * pulse), 255)
+        r_col = _c(60, 255, int(100 + 80 * (1.0 - pulse)))
+        lx = tv_rect.left - max(6, int(10 * sc))
+        rx = tv_rect.right + max(6, int(10 * sc))
+        aw = max(4, int(7 * sc))
+        pygame.draw.polygon(self._screen, l_col, [(lx, cy), (lx + aw, cy - aw), (lx + aw, cy + aw)])
+        pygame.draw.polygon(self._screen, r_col, [(rx, cy), (rx - aw, cy - aw), (rx - aw, cy + aw)])
+
+        # Bottom swipe bar indicator
+        bar_y = area.bottom - max(10, int(16 * sc))
+        bar_w = int(area.width * 0.76)
+        bar_rect = pygame.Rect(cx - bar_w // 2, bar_y - max(3, int(4 * sc)), bar_w, max(5, int(8 * sc)))
+        pygame.draw.rect(self._screen, _c(30, 45, 75), bar_rect, border_radius=max(2, int(4 * sc)))
+        dot_x = cx + int(math.sin(t * 2.4) * (bar_w * 0.36))
+        pygame.draw.circle(self._screen, _c(60, 255, 140), (dot_x, bar_rect.centery), max(3, int(5 * sc)))
 
     def _draw_math_choice_preview(self, area: pygame.Rect, dim: int) -> None:
         """Render an animated Cyber Math Overdrive preview inside the card."""

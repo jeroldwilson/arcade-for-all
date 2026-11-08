@@ -275,8 +275,10 @@ def main() -> None:
     from games.scratch_pad.game    import ScratchPadGame
     from games.math_choice.game    import MathChoiceGame
     from games.villain_slicer.game import VillainSlicerGame
+    from games.youtube_tv.game     import YouTubeTVGame
 
     GAME_REGISTRY = {
+        "youtube_tv":     YouTubeTVGame,
         "villain_slicer": VillainSlicerGame,
         "bricks":         BricksGame,
         "snake":          SnakeGame,
@@ -313,7 +315,7 @@ def main() -> None:
                 if mode == "accessible":
                     gesture_src.config = (
                         CONFIG_ACCESSIBLE_FLICK_STEER
-                        if selected in ("snake", "math_choice")
+                        if selected in ("snake", "math_choice", "youtube_tv")
                         else CONFIG_ACCESSIBLE
                     )
                 else:

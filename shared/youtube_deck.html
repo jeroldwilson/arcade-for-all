@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ASTRA YouTube TV — Accessible Wrist Gesture Deck</title>
+  <style>
+    :root {
+      --bg-dark: #070a14;
+      --panel-bg: rgba(14, 20, 38, 0.92);
+      --cyan: #00ebff;
+      --green: #3cff82;
+      --magenta: #ff37a5;
+      --orange: #ff9b2d;
+      --yellow: #ffe641;
+      --text: #ffffff;
+      --dim: #a5b4d2;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body {
+      background: var(--bg-dark);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Top TV Header Bar ────────────────────────────────────────────────── */
+    #top-bar {
+      height: 68px;
+      background: linear-gradient(90deg, #0b1124 0%, #141f3d 50%, #0b1124 100%);
+      border-bottom: 2px solid rgba(0, 235, 255, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      z-index: 20;
+    }
+
+    .channel-pill {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .badge {
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-weight: 800;
+      font-size: 15px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      background: rgba(0, 235, 255, 0.16);
+      border: 2px solid var(--cyan);
+      color: var(--cyan);
+    }
+
+    #channel-title {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--text);
+      text-shadow: 0 0 12px rgba(0, 235, 255, 0.35);
+    }
+
+    #video-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--yellow);
+      max-width: 34vw;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .status-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 10px var(--green);
+    }
+
+    .dot.warn {
+      background: var(--orange);
+      box-shadow: 0 0 10px var(--orange);
+    }
+
+    .btn {
+      cursor: pointer;
+      padding: 8px 14px;
+      border-radius: 10px;
+      border: 2px solid rgba(0, 235, 255, 0.5);
+      background: rgba(0, 235, 255, 0.12);
+      color: var(--text);
+      font-weight: 700;
+      font-size: 14px;
+      transition: all 0.15s ease;
+    }
+
+    .btn:hover {
+      background: rgba(0, 235, 255, 0.28);
+      transform: translateY(-1px);
+    }
+
+    .btn.magenta {
+      border-color: rgba(255, 55, 165, 0.65);
+      background: rgba(255, 55, 165, 0.15);
+    }
+
+    .btn.exit-btn {
+      border-color: rgba(255, 155, 45, 0.8);
+      background: rgba(255, 155, 45, 0.2);
+      color: var(--yellow);
+    }
+
+    /* ── Main Video Stage ─────────────────────────────────────────────────── */
+    #video-stage {
+      flex: 1;
+      position: relative;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #yt-player {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    #swipe-banner {
+      position: absolute;
+      top: 36px;
+      left: 50%;
+      transform: translateX(-50%) scale(0.92);
+      background: rgba(10, 16, 34, 0.92);
+      border: 3px solid var(--cyan);
+      box-shadow: 0 0 35px rgba(0, 235, 255, 0.5);
+      padding: 18px 38px;
+      border-radius: 20px;
+      font-size: 30px;
+      font-weight: 900;
+      color: var(--text);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.22s ease, transform 0.22s ease;
+      z-index: 30;
+      text-align: center;
+    }
+
+    #swipe-banner.show {
+      opacity: 1;
+      transform: translateX(-50%) scale(1);
+    }
+
+    /* ── Bottom 10-Foot HDMI TV Gesture HUD ───────────────────────────────── */
+    #bottom-hud {
+      height: 118px;
+      background: linear-gradient(180deg, #0d1428 0%, #070b16 100%);
+      border-top: 2px solid rgba(0, 235, 255, 0.35);
+      display: grid;
+      grid-template-columns: 1fr 1.35fr 1fr;
+      align-items: center;
+      gap: 20px;
+      padding: 10px 24px;
+      z-index: 20;
+    }
+
+    .wing-card {
+      position: relative;
+      height: 86px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 2px solid rgba(255, 255, 255, 0.16);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 22px;
+      cursor: pointer;
+      transition: border-color 0.15s, box-shadow 0.15s, opacity 0.2s;
+    }
+
+    .wing-card.locked {
+      opacity: 0.55;
+    }
+
+    .wing-card.armed-left {
+      border-color: var(--cyan);
+      box-shadow: 0 0 25px rgba(0, 235, 255, 0.45);
+    }
+
+    .wing-card.armed-right {
+      border-color: var(--green);
+      box-shadow: 0 0 25px rgba(60, 255, 130, 0.45);
+    }
+
+    .wing-fill {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 0%;
+      pointer-events: none;
+      transition: width 0.06s linear;
+    }
+
+    #left-fill {
+      right: 0;
+      background: linear-gradient(270deg, rgba(0, 235, 255, 0.12), rgba(0, 235, 255, 0.48));
+    }
+
+    #right-fill {
+      left: 0;
+      background: linear-gradient(90deg, rgba(60, 255, 130, 0.12), rgba(60, 255, 130, 0.48));
+    }
+
+    .wing-label {
+      position: relative;
+      z-index: 2;
+      font-size: 22px;
+      font-weight: 900;
+      letter-spacing: 0.5px;
+    }
+
+    .wing-sub {
+      position: relative;
+      z-index: 2;
+      font-size: 13px;
+      color: var(--dim);
+      font-weight: 600;
+    }
+
+    /* Center 3-Step Combo Stepper & Wrist Gauge */
+    .center-gauge {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .combo-steps {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      justify-content: center;
+    }
+
+    .step-pill {
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 800;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: var(--dim);
+    }
+
+    .step-pill.active {
+      background: rgba(255, 230, 65, 0.2);
+      border-color: var(--yellow);
+      color: var(--yellow);
+      box-shadow: 0 0 12px rgba(255, 230, 65, 0.35);
+    }
+
+    .step-pill.done {
+      background: rgba(60, 255, 130, 0.2);
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .gauge-track {
+      width: 100%;
+      height: 22px;
+      background: rgba(255, 255, 255, 0.07);
+      border-radius: 11px;
+      border: 2px solid rgba(255, 255, 255, 0.18);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .gauge-center-line {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    #wrist-dot {
+      position: absolute;
+      top: 2px;
+      width: 26px;
+      height: 14px;
+      border-radius: 7px;
+      background: var(--cyan);
+      box-shadow: 0 0 12px var(--cyan);
+      left: calc(50% - 13px);
+      transition: left 0.05s linear;
+    }
+
+    .cooldown-wrap {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--dim);
+    }
+
+    .cooldown-bar-bg {
+      flex: 1;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 5px;
+      overflow: hidden;
+    }
+
+    #cooldown-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--orange), var(--yellow));
+      transition: width 0.08s linear;
+    }
+
+    /* ── Parent Channel Manager Modal ─────────────────────────────────────── */
+    #parent-drawer {
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 8, 18, 0.86);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+    }
+
+    #parent-drawer.open {
+      display: flex;
+    }
+
+    .modal-card {
+      width: min(860px, 95vw);
+      max-height: 88vh;
+      background: #101830;
+      border: 2px solid var(--cyan);
+      border-radius: 20px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+      padding-bottom: 14px;
+    }
+
+    .modal-header h2 {
+      font-size: 24px;
+      color: var(--cyan);
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr 1.6fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    input {
+      background: #090e1d;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      color: #fff;
+      padding: 11px 14px;
+      border-radius: 10px;
+      font-size: 15px;
+    }
+
+    .channel-list-box {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+
+    .ch-group {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      padding: 12px 16px;
+    }
+
+    .ch-group h4 {
+      color: var(--green);
+      margin-bottom: 8px;
+      font-size: 17px;
+    }
+
+    .vid-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      font-size: 14px;
+    }
+
+    .del-btn {
+      background: rgba(255, 70, 70, 0.2);
+      border: 1px solid #ff5555;
+      color: #ff9999;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <div id="top-bar">
+    <div class="channel-pill">
+      <button class="btn exit-btn" onclick="quitToArcade()">⬅ Back to Arcade (ESC)</button>
+      <span class="badge" id="user-badge">PLAYER</span>
+      <span id="channel-title">Channel 1</span>
+      <span style="color: var(--dim);">•</span>
+      <span id="video-title">Loading video...</span>
+    </div>
+
+    <div class="top-actions">
+      <div class="status-chip">
+        <div class="dot" id="sensor-dot"></div>
+        <span id="sensor-status-text">Sensor Ready</span>
+      </div>
+      <button class="btn" onclick="triggerAction('next_channel')">Next Channel (C)</button>
+      <button class="btn magenta" onclick="toggleParentDrawer(true)">Parent Setup / Paste URL</button>
+    </div>
+  </div>
+
+  <!-- Video Stage -->
+  <div id="video-stage">
+    <div id="yt-player"></div>
+    <div id="swipe-banner">NEXT VIDEO ▶</div>
+  </div>
+
+  <!-- Bottom 10-Foot Accessible 3-Step Combo Gesture Bar -->
+  <div id="bottom-hud">
+    <div class="wing-card locked" id="left-wing" onclick="triggerAction('prev')">
+      <div class="wing-fill" id="left-fill"></div>
+      <div>
+        <div class="wing-label" style="color: var(--cyan);">◀ SWIPE LEFT</div>
+        <div class="wing-sub" id="left-sub">Step 1: Flick Up or Hold to Unlock</div>
+      </div>
+      <div style="font-size: 26px; font-weight: 900; color: var(--cyan); z-index:2;">PREV</div>
+    </div>
+
+    <div class="center-gauge">
+      <div class="combo-steps">
+        <span class="step-pill active" id="step-1-pill">1. Flick Up / Hold 1s to Unlock</span>
+        <span class="step-pill" id="step-2-pill">2. Center Wrist</span>
+        <span class="step-pill" id="step-3-pill">3. Swipe Left / Right</span>
+      </div>
+      <div class="gauge-track">
+        <div class="gauge-center-line"></div>
+        <div id="wrist-dot"></div>
+      </div>
+      <div class="cooldown-wrap">
+        <span id="cooldown-label">SAFE WATCH LOCK (Excited movements ignored)</span>
+        <div class="cooldown-bar-bg">
+          <div id="cooldown-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="wing-card locked" id="right-wing" onclick="triggerAction('next')">
+      <div class="wing-fill" id="right-fill"></div>
+      <div style="font-size: 26px; font-weight: 900; color: var(--green); z-index:2;">NEXT</div>
+      <div style="text-align: right;">
+        <div class="wing-label" style="color: var(--green);">SWIPE RIGHT ▶</div>
+        <div class="wing-sub" id="right-sub">Step 1: Flick Up or Hold to Unlock</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Parent Channel Setup Modal -->
+  <div id="parent-drawer">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Parent Setup — Add Kid/Teen YouTube Videos or Playlists</h2>
+        <div style="display:flex; gap:10px;">
+          <button class="btn" onclick="refreshDefaultChannels()">Reset Default Channels</button>
+          <button class="btn" onclick="toggleParentDrawer(false)">Close</button>
+        </div>
+      </div>
+      <p style="color: var(--dim); font-size: 15px; line-height: 1.4;">
+        <strong>No API Token Required:</strong> Paste any normal YouTube link (e.g.
+        <code>https://www.youtube.com/watch?v=...</code> or playlist <code>https://www.youtube.com/playlist?list=...</code>).
+        Saved directly to this kid's profile (<code id="profile-file-label">data/youtube_channels.json</code>).
+      </p>
+
+      <div class="form-row">
+        <input type="text" id="new-ch-name" placeholder="Channel (e.g. Music)" value="Channel 1: Teen Music & Electronic Beats (NCS)" />
+        <input type="text" id="new-vid-title" placeholder="Video/Playlist Title" />
+        <input type="text" id="new-vid-url" placeholder="Paste YouTube URL or Video ID..." />
+        <button class="btn" onclick="addVideoUrl()">+ Add to Profile</button>
+      </div>
+
+      <div class="channel-list-box" id="channel-list-box"></div>
+    </div>
+  </div>
+
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script>
+    let player = null;
+    let playerReady = false;
+    let lastCommandSeq = -1;
+    let lastComboStep = 0;
+    let currentVideoKey = "";
+    let cachedState = null;
+    let bannerTimeout = null;
+
+    function onYouTubeIframeAPIReady() {
+      player = new YT.Player('yt-player', {
+        width: '100%',
+        height: '100%',
+        videoId: 'K4DyBUG242c',
+        playerVars: {
+          autoplay: 1,
+          controls: 1,
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          fs: 1
+        },
+        events: {
+          onReady: () => {
+            playerReady = true;
+            syncVideoWithState();
+          },
+          onStateChange: (ev) => {
+            if (ev.data === YT.PlayerState.ENDED) {
+              triggerAction('next');
+            }
+          },
+          onError: () => {
+            showBanner("Video Unavailable — Skipping ▶");
+            setTimeout(() => triggerAction('next'), 1500);
+          }
+        }
+      });
+    }
+
+    function showBanner(text) {
+      const b = document.getElementById('swipe-banner');
+      b.textContent = text;
+      b.classList.add('show');
+      if (bannerTimeout) clearTimeout(bannerTimeout);
+      bannerTimeout = setTimeout(() => b.classList.remove('show'), 1800);
+    }
+
+    function syncVideoWithState() {
+      if (!playerReady || !cachedState || !cachedState.current_item) return;
+      const item = cachedState.current_item;
+      const key = `${item.video_id || ''}:${item.playlist_id || ''}`;
+      if (key && key !== currentVideoKey) {
+        currentVideoKey = key;
+        if (item.playlist_id && !item.video_id) {
+          player.loadPlaylist({ list: item.playlist_id, listType: 'playlist' });
+        } else if (item.video_id) {
+          player.loadVideoById(item.video_id);
+        }
+      }
+    }
+
+    async function triggerAction(action) {
+      try {
+        await fetch('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function quitToArcade() {
+      showBanner("Returning to Arcade Menu...");
+      try {
+        await fetch('/api/quit', { method: 'POST' });
+      } catch (e) {}
+      setTimeout(() => {
+        window.close();
+      }, 250);
+    }
+
+    async function refreshDefaultChannels() {
+      await fetch('/api/refresh_defaults', { method: 'POST' });
+      setTimeout(renderChannelManager, 250);
+      showBanner("Channels Refreshed!");
+    }
+
+    function toggleParentDrawer(open) {
+      const el = document.getElementById('parent-drawer');
+      if (open) {
+        renderChannelManager();
+        el.classList.add('open');
+      } else {
+        el.classList.remove('open');
+      }
+    }
+
+    function renderChannelManager() {
+      if (!cachedState || !cachedState.channels) return;
+      const box = document.getElementById('channel-list-box');
+      box.innerHTML = '';
+      cachedState.channels.forEach((ch, cIdx) => {
+        const div = document.createElement('div');
+        div.className = 'ch-group';
+        const h4 = document.createElement('h4');
+        h4.textContent = `${ch.name} (${ch.items.length} videos)`;
+        div.appendChild(h4);
+
+        ch.items.forEach((it, vIdx) => {
+          const row = document.createElement('div');
+          row.className = 'vid-item';
+          row.innerHTML = `
+            <span><strong>${it.title}</strong> <code style="color:var(--dim)">${it.video_id || it.playlist_id}</code></span>
+            <button class="del-btn" onclick="deleteVideoItem(${cIdx}, ${vIdx})">Remove</button>
+          `;
+          div.appendChild(row);
+        });
+        box.appendChild(div);
+      });
+    }
+
+    async function addVideoUrl() {
+      const channelName = document.getElementById('new-ch-name').value.trim() || "My Channel";
+      const title = document.getElementById('new-vid-title').value.trim() || "Favorite Video";
+      const url = document.getElementById('new-vid-url').value.trim();
+      if (!url) return;
+
+      await fetch('/api/add_video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_name: channelName, title, url })
+      });
+      document.getElementById('new-vid-title').value = '';
+      document.getElementById('new-vid-url').value = '';
+      setTimeout(renderChannelManager, 250);
+    }
+
+    async function deleteVideoItem(channelIdx, itemIdx) {
+      await fetch('/api/delete_video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_idx: channelIdx, item_idx: itemIdx })
+      });
+      setTimeout(renderChannelManager, 250);
+    }
+
+    // Keyboard shortcuts inside browser window (including ESC to exit back to Arcade!)
+    window.addEventListener('keydown', (e) => {
+      if (document.getElementById('parent-drawer').classList.contains('open')) {
+        if (e.key === 'Escape') toggleParentDrawer(false);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        quitToArcade();
+      } else if (e.key === 'ArrowRight') {
+        triggerAction('next');
+      } else if (e.key === 'ArrowLeft') {
+        triggerAction('prev');
+      } else if (e.key === 'c' || e.key === 'C' || e.key === 'ArrowUp') {
+        triggerAction('next_channel');
+      } else if (e.key === 'u' || e.key === 'U') {
+        triggerAction('unlock');
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        triggerAction('toggle_pause');
+      }
+    });
+
+    // Poll Python sensor bridge at 20 Hz
+    setInterval(async () => {
+      try {
+        const res = await fetch('/api/state');
+        const st = await res.json();
+        cachedState = st;
+
+        if (st.quit_requested) {
+          window.close();
+          return;
+        }
+
+        document.getElementById('user-badge').textContent = st.username ? `PLAYER: ${st.username}` : 'PLAYER: GUEST';
+        document.getElementById('profile-file-label').textContent = st.config_file || 'data/youtube_channels.json';
+        document.getElementById('channel-title').textContent = st.channel_name || 'Channel';
+        document.getElementById('video-title').textContent = st.current_item ? st.current_item.title : '';
+
+        // Sensor dot
+        const dot = document.getElementById('sensor-dot');
+        const stxt = document.getElementById('sensor-status-text');
+        if (st.calibrated) {
+          dot.className = 'dot';
+          stxt.textContent = st.ml_ready ? 'Sensor + AI Ready' : 'Sensor Calibrated';
+        } else {
+          dot.className = 'dot warn';
+          stxt.textContent = 'Keyboard / Calibrating...';
+        }
+
+        // Wrist tilt dot [-1 .. +1]
+        const tilt = Math.max(-1, Math.min(1, st.tilt || 0));
+        const pct = ((tilt + 1) / 2) * 100;
+        document.getElementById('wrist-dot').style.left = `calc(${pct}% - 13px)`;
+
+        // 3-Step Combo UI Updates
+        const step = st.combo_step || 0;
+        if (step !== lastComboStep) {
+          if (step > 0 && lastComboStep === 0) {
+            showBanner("🔓 REMOTE UNLOCKED — SWIPE LEFT OR RIGHT!");
+          }
+          lastComboStep = step;
+        }
+
+        const p1 = document.getElementById('step-1-pill');
+        const p2 = document.getElementById('step-2-pill');
+        const p3 = document.getElementById('step-3-pill');
+        p1.className = 'step-pill ' + (step === 0 ? 'active' : 'done');
+        p2.className = 'step-pill ' + (step === 1 ? 'active' : (step >= 2 ? 'done' : ''));
+        p3.className = 'step-pill ' + (step === 2 ? 'active' : '');
+
+        const lw = document.getElementById('left-wing');
+        const rw = document.getElementById('right-wing');
+        const lsub = document.getElementById('left-sub');
+        const rsub = document.getElementById('right-sub');
+
+        if (step === 2) {
+          lw.classList.remove('locked');
+          rw.classList.remove('locked');
+          lw.classList.add('armed-left');
+          rw.classList.add('armed-right');
+          lsub.textContent = `ARMED (${st.combo_timer.toFixed(1)}s) — Hold/Swipe Left!`;
+          rsub.textContent = `ARMED (${st.combo_timer.toFixed(1)}s) — Hold/Swipe Right!`;
+        } else {
+          lw.classList.add('locked');
+          rw.classList.add('locked');
+          lw.classList.remove('armed-left');
+          rw.classList.remove('armed-right');
+          const msg = step === 1 ? "Step 2: Relax wrist to center..." : "Step 1: Flick Up or Hold 1s to Unlock";
+          lsub.textContent = msg;
+          rsub.textContent = msg;
+        }
+
+        // Hold progress wings
+        const leftPct = Math.round((st.left_charge || 0) * 100);
+        const rightPct = Math.round((st.right_charge || 0) * 100);
+        document.getElementById('left-fill').style.width = `${leftPct}%`;
+        document.getElementById('right-fill').style.width = `${rightPct}%`;
+
+        // Cooldown / Unlock bar
+        const cdPct = Math.round((st.cooldown_frac || 0) * 100);
+        const unlockPct = Math.round((st.unlock_charge || 0) * 100);
+        if (cdPct > 0) {
+          document.getElementById('cooldown-fill').style.width = `${cdPct}%`;
+          document.getElementById('cooldown-label').textContent =
+            `POST-SWIPE LOCK (${st.cooldown_rem.toFixed(1)}s)`;
+        } else if (step === 0) {
+          document.getElementById('cooldown-fill').style.width = `${unlockPct}%`;
+          document.getElementById('cooldown-label').textContent =
+            unlockPct > 0 ? `UNLOCKING REMOTE (${unlockPct}%)...` : 'WATCH LOCK ON (Excited movements safe)';
+        } else if (step === 1) {
+          document.getElementById('cooldown-fill').style.width = `100%`;
+          document.getElementById('cooldown-label').textContent = 'RELAX WRIST TO CENTER TO ARM SWIPE';
+        } else {
+          const timerPct = Math.round((st.combo_timer / 6.0) * 100);
+          document.getElementById('cooldown-fill').style.width = `${timerPct}%`;
+          document.getElementById('cooldown-label').textContent =
+            `🔓 ARMED (${st.combo_timer.toFixed(1)}s) — SWIPE LEFT OR RIGHT NOW!`;
+        }
+
+        // Handle discrete commands from Python sensor
+        if (st.command_seq !== lastCommandSeq) {
+          if (lastCommandSeq !== -1 && st.last_command) {
+            if (st.last_command === 'next') showBanner(`NEXT ▶ ${st.current_item?.title || ''}`);
+            else if (st.last_command === 'prev') showBanner(`◀ PREV: ${st.current_item?.title || ''}`);
+            else if (st.last_command === 'next_channel') showBanner(`📺 ${st.channel_name}`);
+            else if (st.last_command === 'toggle_pause' && playerReady) {
+              const pState = player.getPlayerState();
+              if (pState === YT.PlayerState.PLAYING) {
+                player.pauseVideo();
+                showBanner("⏸ PAUSED");
+              } else {
+                player.playVideo();
+                showBanner("▶ PLAYING");
+              }
+            }
+          }
+          lastCommandSeq = st.command_seq;
+          syncVideoWithState();
+        }
+      } catch (e) {
+        // Server shutting down
+      }
+    }, 50);
+  </script>
+</body>
+</html>
