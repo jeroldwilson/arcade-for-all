@@ -40,6 +40,7 @@ from shared.gesture_learner import (
     SmartRecorder,
     ValidationResult,
     GestureProfile,
+    GestureLearningSystem,
 )
 from shared.gesture_engine import GestureEngineManager
 
@@ -86,7 +87,7 @@ class TestFallbackSignConvention(unittest.TestCase):
                             scale_x=5.0, scale_y=5.0, dt=1.0 / 60):
         """Drive get_cursor_delta through the no-model fallback path."""
         gs = _make_gs(abs_gx=0.0, abs_gy=gy, abs_gz=gz)
-        system = GestureEngineManager.__new__(GestureEngineManager)
+        system = GestureLearningSystem.__new__(GestureLearningSystem)
         system.buffer       = GestureBuffer()
         system.extractor    = FeatureExtractor()
         system.recorder     = SmartRecorder(system.buffer, system.extractor)

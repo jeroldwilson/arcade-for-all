@@ -69,6 +69,76 @@ class TestMathAlgebra(unittest.TestCase):
         self.assertGreater(game.correct_answer, 0)
         self.assertTrue(game.left_ans == game.correct_answer or game.right_ans == game.correct_answer)
 
+    def test_optional_qwen_coach_tones_and_fallback(self):
+        from shared.llm_coach import QwenCoach
+
+        coach = QwenCoach(username="Jerold", enabled=False)
+        # By default (and when LLM is not installed), get_feedback returns None so standard TTS is never overridden
+        self.assertIsNone(coach.get_feedback("success", "7 × 8", "7 times 8", 56, streak=3))
+
+        # Verify tone classification between random one-off slip ("random_miss") vs struggling/slow ("motivate")
+        self.assertEqual(
+            QwenCoach.classify_miss_tone(streak_before_miss=4, consecutive_misses=1, response_seconds=3.5),
+            "random_miss",
+        )
+        self.assertEqual(
+            QwenCoach.classify_miss_tone(streak_before_miss=0, consecutive_misses=2, response_seconds=4.0),
+            "motivate",
+        )
+        self.assertEqual(
+            QwenCoach.classify_miss_tone(streak_before_miss=1, consecutive_misses=1, response_seconds=15.0),
+            "motivate",
+        )
+
+        # Verify formatting of middle-school LLM lines for all 3 tones
+        h1, s1, sp1 = coach._format_for_hud(
+            "Big brain move right there, Jerold!", "success", "2x + 3 = 11", "2 x plus 3 equals 11", 4, 3, "right", True
+        )
+        self.assertIn("BIG BRAIN MOVE", h1)
+        self.assertIn("x = 4", s1)
+        # Ensure "(AI Coach)" is NOT present in the HUD message text
+        self.assertNotIn("(AI Coach)", s1)
+        # Ensure no unicode star or non-ascii glyphs that render as tofu boxes
+        self.assertNotIn("★", h1)
+        self.assertTrue(all(ord(c) < 128 for c in h1))
+
+        h2, s2, sp2 = coach._format_for_hud(
+            "Almost had it, shake it off!", "random_miss", "5 × 6", "5 times 6", 30, 2, "left", False
+        )
+        self.assertIn("ALMOST HAD IT", h2)
+        self.assertNotIn("(AI Coach)", s2)
+        self.assertIn("Move left for 30", sp2)
+
+        h3, s3, sp3 = coach._format_for_hud(
+            "Take a deep breath, you are building real skill.", "motivate", "3x = 15", "3 x equals 15", 5, 0, "right", True
+        )
+        self.assertIn("TAKE A DEEP BREATH", h3)
+        self.assertNotIn("(AI Coach)", s3)
+        self.assertIn("Aim right for 5", sp3)
+
+    def test_feedback_banner_bounds_and_tts_wait(self):
+        game = MathChoiceGame(self.screen, self.clock, username="Jerold")
+        game.tts.enabled = False
+
+        # Set an intentionally extra long headline and subtext
+        game.feedback_headline = "JEROLD IS TRULY A MATH ACE WITH A STELLAR UNSTOPPABLE WINNING STREAK"
+        game.feedback_subtext = "5 × 7 = 35 • Streak x1!"
+        game.feedback_type = "correct"
+        game.feedback_color = (0, 255, 128)
+
+        # Drawing should gracefully auto-scale and fit without error
+        game._draw_feedback_banner()
+
+        # Verify TTS speaking property
+        self.assertFalse(game.tts.is_speaking)
+
+        # Verify feedback wait loop: while TTS is speaking, feedback timer stays active
+        game.tts.enabled = True
+        game.handle_correct("left", (200, 300))
+        self.assertTrue(game._pending_new_problem)
+        self.assertGreater(game.feedback_timer, 0)
+        game.tts.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,7 @@ import pygame
 
 from shared.gesture import CONFIG_ACCESSIBLE_FLICK_STEER, CONFIG_STANDARD
 from shared.gesture_hud import GestureHUD
+from shared.llm_coach import QwenCoach
 from shared.game_experience import (
     FireworksCelebration,
     GameExitAppreciationScreen,
@@ -71,6 +72,7 @@ class MathTTS:
         self.enabled = enabled
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
+        self._is_launching = False
         self._say_bin = shutil.which("say")
         self._espeak_bin = shutil.which("espeak") or shutil.which("espeak-ng")
 
@@ -78,42 +80,64 @@ class MathTTS:
     def available(self) -> bool:
         return bool(self._say_bin or self._espeak_bin)
 
+    @property
+    def is_speaking(self) -> bool:
+        """Return True if speech subprocess is actively speaking or launching."""
+        if not self.enabled or not self.available:
+            return False
+        with self._lock:
+            if self._is_launching:
+                return True
+            if self._proc is not None:
+                if self._proc.poll() is None:
+                    return True
+                self._proc = None
+        return False
+
     def speak(self, text: str, interrupt: bool = True, rate: int = 185) -> None:
         """Speak `text` asynchronously without blocking the game loop."""
         if not self.enabled or not text or not self.available:
             return
 
-        def _worker():
-            with self._lock:
-                if interrupt and self._proc is not None:
-                    try:
-                        if self._proc.poll() is None:
-                            self._proc.terminate()
-                    except Exception:
-                        pass
-                    self._proc = None
-
+        with self._lock:
+            if interrupt and self._proc is not None:
                 try:
-                    if self._say_bin:
-                        self._proc = subprocess.Popen(
-                            [self._say_bin, "-r", str(rate), text],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    elif self._espeak_bin:
-                        self._proc = subprocess.Popen(
-                            [self._espeak_bin, "-s", str(rate), text],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
+                    if self._proc.poll() is None:
+                        self._proc.terminate()
                 except Exception:
+                    pass
+                self._proc = None
+            self._is_launching = True
+
+        def _worker():
+            try:
+                cmd = []
+                if self._say_bin:
+                    cmd = [self._say_bin, "-r", str(rate), text]
+                elif self._espeak_bin:
+                    cmd = [self._espeak_bin, "-s", str(rate), text]
+
+                if cmd:
+                    p = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    with self._lock:
+                        self._proc = p
+            except Exception:
+                with self._lock:
                     self._proc = None
+            finally:
+                with self._lock:
+                    self._is_launching = False
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def stop(self) -> None:
         """Immediately stop any active speech subprocess."""
         with self._lock:
+            self._is_launching = False
             if self._proc is not None:
                 try:
                     if self._proc.poll() is None:
@@ -298,6 +322,10 @@ class MathChoiceGame:
         self._stars = StarField(n=90)
         self.hud = GestureHUD(scale=0.3)
         self.tts = MathTTS(enabled=True)
+        # Optional, toggleable Qwen 2.5 1.5B AI Coach (OFF by default; never overrides standard TTS unless toggled with Q)
+        self.llm_coach = QwenCoach(username=self.display_name, enabled=False)
+        self._question_start_time = time.monotonic()
+        self._consecutive_misses = 0
 
         # Score, streak, and progression
         self.score = 0
@@ -346,6 +374,8 @@ class MathChoiceGame:
         self.feedback_subtext = ""
         self.feedback_color = TEXT_WHITE
         self._pending_new_problem = False
+        self._tts_wait_timeout = 0.0
+        self._tts_finished = False
         self._wrong_side_eliminated: Optional[str] = None  # dims wrong portal after a miss
 
         # Current problem fields
@@ -437,6 +467,7 @@ class MathChoiceGame:
         self._wrong_side_eliminated = None
         self.dwell_timer = 0.0
         self.dwell_side = None
+        self._question_start_time = time.monotonic()
 
         # Every 5th streak (when streak > 0) triggers a Boss Drone encounter!
         self.is_boss_round = (self.streak > 0 and self.streak % 5 == 0)
@@ -598,11 +629,26 @@ class MathChoiceGame:
         else:
             self.level2_misses = 0
 
-        # Personalized appreciation messages with username
+        self._consecutive_misses = 0
+
+        # Personalized appreciation messages with username (Optional Qwen 2.5 1.5B Coach if toggled ON, else Standard TTS)
+        llm_res = None
+        if not level_up_occurred and self.llm_coach.enabled:
+            llm_res = self.llm_coach.get_feedback(
+                tone="success",
+                problem_text=self.problem_text,
+                spoken_problem=self.spoken_problem,
+                correct_answer=self.correct_answer,
+                streak=self.streak,
+                is_algebra=(self.level == 2),
+            )
+
         if level_up_occurred:
             headline = f"★ LEVEL UP: CYBER ALGEBRA UNLOCKED! ★"
             subtext = f"{name.upper()} solved {self.level_up_threshold} in a row! Advancing to Middle School Algebra!"
             spoken = f"Level Up, {name}! You unlocked Middle School Cyber Algebra! Solve for x!"
+        elif llm_res is not None:
+            headline, subtext, spoken = llm_res
         elif self.level == 2:
             praise_templates = [
                 (
@@ -651,8 +697,10 @@ class MathChoiceGame:
         self.feedback_headline = headline
         self.feedback_subtext = subtext
         self.feedback_color = NEON_GREEN
-        self.feedback_timer = 2.4 if level_up_occurred else 2.1
+        self.feedback_timer = 2.4 if level_up_occurred else 2.0
         self._pending_new_problem = True
+        self._tts_wait_timeout = 6.0
+        self._tts_finished = False
         self.dwell_timer = 0.0
         self.dwell_side = None
 
@@ -666,7 +714,11 @@ class MathChoiceGame:
             self._last_celebrated_score = self.score
 
     def handle_wrong(self, side: str, target_pos: Tuple[int, int]) -> None:
+        prev_streak = self.streak
         self.streak = 0
+        self._consecutive_misses += 1
+        response_secs = max(0.0, time.monotonic() - self._question_start_time)
+
         if self.audio:
             self.audio.play("brick_hit")
 
@@ -682,6 +734,25 @@ class MathChoiceGame:
         other_side = "right" if side == "left" else "left"
         name = self.display_name
 
+        # Classify whether this was a random one-off slip-up ("random_miss" -> playful non-sarcastic "Oof/Oops")
+        # or if the player is struggling / playing less enthusiastically ("motivate" -> warm motivational push)
+        miss_tone = self.llm_coach.classify_miss_tone(
+            streak_before_miss=prev_streak,
+            consecutive_misses=self._consecutive_misses,
+            response_seconds=response_secs,
+        )
+        llm_res = None
+        if self.llm_coach.enabled:
+            llm_res = self.llm_coach.get_feedback(
+                tone=miss_tone,
+                problem_text=self.problem_text,
+                spoken_problem=self.spoken_problem,
+                correct_answer=self.correct_answer,
+                streak=prev_streak,
+                other_side=other_side,
+                is_algebra=(self.level == 2),
+            )
+
         if self.level == 2:
             self.level2_misses += 1
             if self.level2_misses >= 3:
@@ -694,35 +765,96 @@ class MathChoiceGame:
                 ))
 
             ans_hint = f"x = {self.correct_answer}"
-            encourage_templates = [
-                (
-                    f"NICE TRY, {name.upper()}! YOU'VE GOT THIS!",
-                    f"In {self.problem_text}, {ans_hint}  •  Move {other_side.upper()}!",
-                    f"Nice try, {name}! In {self.spoken_problem}, x is {self.correct_answer}. Move {other_side}!"
-                ),
-                (
-                    f"SO CLOSE, {name.upper()}! TRY {other_side.upper()}!",
-                    f"Aim {other_side.upper()} to lock in {ans_hint}!",
-                    f"So close, {name}! Move {other_side} for x equals {self.correct_answer}!"
-                ),
-            ]
+            if miss_tone == "random_miss":
+                encourage_templates = [
+                    (
+                        f"SO CLOSE, {name.upper()}!",
+                        f"Right on the edge! In {self.problem_text}, {ans_hint}  •  Move {other_side.upper()}!",
+                        f"So close, {name}! Move {other_side} for x equals {self.correct_answer}!"
+                    ),
+                    (
+                        f"ALMOST HAD IT, {name.upper()}!",
+                        f"Quick slip! Aim {other_side.upper()} to lock in {ans_hint}!",
+                        f"Almost had it, {name}! Shake it off and move {other_side} for x equals {self.correct_answer}!"
+                    ),
+                    (
+                        f"EASY FIX, {name.upper()}!",
+                        f"No sweat! In {self.problem_text}, {ans_hint}  •  Move {other_side.upper()}!",
+                        f"Easy fix, {name}! Move {other_side} to grab {self.correct_answer}!"
+                    ),
+                    (
+                        f"QUICK RESET, {name.upper()}!",
+                        f"Brush it off! Aim {other_side.upper()} for {ans_hint}!",
+                        f"Quick reset, {name}! You're right there, move {other_side}!"
+                    ),
+                ]
+            else:
+                encourage_templates = [
+                    (
+                        f"YOU'VE GOT THIS, {name.upper()}! KEEP PUSHING!",
+                        f"Take your time! In {self.problem_text}, {ans_hint}  •  Move {other_side.upper()}!",
+                        f"Hey {name}, you've got this! Every try makes you stronger. Move {other_side} for x equals {self.correct_answer}!"
+                    ),
+                    (
+                        f"STAY LOCKED IN, {name.upper()}! I BELIEVE IN YOU!",
+                        f"Step by step! Aim {other_side.upper()} to lock in {ans_hint}!",
+                        f"Stay locked in, {name}! Take a breath and move {other_side} for x equals {self.correct_answer}!"
+                    ),
+                    (
+                        f"STEP BY STEP, {name.upper()}!",
+                        f"Breathe and focus! {ans_hint}  •  Move {other_side.upper()}!",
+                        f"Step by step, {name}! You can crack this equation. Move {other_side} for {self.correct_answer}!"
+                    ),
+                ]
         else:
             self.level1_streak = 0
             ans_hint = str(self.correct_answer)
-            encourage_templates = [
-                (
-                    f"NICE TRY, {name.upper()}! YOU'VE GOT THIS!",
-                    f"Move toward {other_side.upper()} ({ans_hint}) to solve {self.problem_text}!",
-                    f"Nice try, {name}! You've got this! Move {other_side} for {ans_hint}!"
-                ),
-                (
-                    f"SO CLOSE, {name.upper()}! TRY THE OTHER SIDE!",
-                    f"{self.problem_text} = {ans_hint}  •  Move {other_side.upper()} to lock it in!",
-                    f"So close, {name}! {self.spoken_problem} is {ans_hint}. Move {other_side}!"
-                ),
-            ]
+            if miss_tone == "random_miss":
+                encourage_templates = [
+                    (
+                        f"SO CLOSE, {name.upper()}!",
+                        f"No worries! Move {other_side.upper()} ({ans_hint}) to solve {self.problem_text}!",
+                        f"So close, {name}! Shake it off and move {other_side} for {ans_hint}!"
+                    ),
+                    (
+                        f"ALMOST HAD IT, {name.upper()}!",
+                        f"{self.problem_text} = {ans_hint}  •  Swing {other_side.upper()} to grab it!",
+                        f"Almost had it, {name}! {self.spoken_problem} is {ans_hint}. Move {other_side}!"
+                    ),
+                    (
+                        f"EASY FIX, {name.upper()}!",
+                        f"No sweat! Swing {other_side.upper()} for {self.problem_text} = {ans_hint}!",
+                        f"Easy fix, {name}! Move {other_side} for {ans_hint}!"
+                    ),
+                    (
+                        f"BRUSH IT OFF, {name.upper()}!",
+                        f"Next one is yours! Move {other_side.upper()} ({ans_hint})!",
+                        f"Brush it off, {name}! You're right on target, swing {other_side}!"
+                    ),
+                ]
+            else:
+                encourage_templates = [
+                    (
+                        f"DON'T GIVE UP, {name.upper()}! YOU CAN DO THIS!",
+                        f"Take a breath and swing {other_side.upper()} ({ans_hint}) for {self.problem_text}!",
+                        f"Hey {name}, don't give up! You are building real skill. Move {other_side} for {ans_hint}!"
+                    ),
+                    (
+                        f"KEEP GOING, {name.upper()}! WE'RE IN THIS TOGETHER!",
+                        f"{self.problem_text} = {ans_hint}  •  Move {other_side.upper()} to lock it in!",
+                        f"Keep going, {name}! Take your time, {self.spoken_problem} is {ans_hint}. Move {other_side}!"
+                    ),
+                    (
+                        f"STAY CONFIDENT, {name.upper()}!",
+                        f"Take your time! Swing {other_side.upper()} for {ans_hint}!",
+                        f"Stay confident, {name}! You've got all the tools. Move {other_side} for {ans_hint}!"
+                    ),
+                ]
 
-        headline, subtext, spoken = random.choice(encourage_templates)
+        if llm_res is not None:
+            headline, subtext, spoken = llm_res
+        else:
+            headline, subtext, spoken = random.choice(encourage_templates)
 
         self.feedback_type = "wrong"
         self.feedback_headline = headline
@@ -730,6 +862,8 @@ class MathChoiceGame:
         self.feedback_color = NEON_YELLOW
         self.feedback_timer = 1.8
         self._pending_new_problem = False
+        self._tts_wait_timeout = 4.0
+        self._tts_finished = False
         self.dwell_timer = 0.0
         self.dwell_side = None
 
@@ -1006,6 +1140,16 @@ class MathChoiceGame:
                         ))
                         self.tts.speak(f"Level switched to {lvl_name}!", interrupt=True)
                         self.generate_problem(speak_now=True)
+                    elif event.key == pygame.K_q:
+                        # Toggle Optional Qwen 2.5 1.5B AI Coach (only activates if model is installed)
+                        enabled, msg = self.llm_coach.toggle()
+                        self._popups.append(FloatingPopup(
+                            self.W // 2, int(self.H * 0.42), msg, NEON_GREEN if enabled else NEON_ORANGE
+                        ))
+                        if enabled:
+                            self.tts.speak("Qwen A I Coach enabled!", interrupt=True)
+                        else:
+                            self.tts.speak("Using standard voice.", interrupt=True)
                     elif event.key in (pygame.K_LEFT, pygame.K_a) and self.feedback_timer <= 0:
                         if self._wrong_side_eliminated != "left":
                             self.cursor_x = float(self.left_portal[0])
@@ -1073,16 +1217,35 @@ class MathChoiceGame:
                 pop.life -= dt
             self._popups = [pop for pop in self._popups if pop.life > 0]
 
-            # Update feedback timer & transition to next problem once praise finishes
+            # Update feedback timer & transition to next problem once voice finishes
             if self.feedback_timer > 0:
                 self.feedback_timer -= dt
                 self.cursor_x += (self.W * 0.5 - self.cursor_x) * min(1.0, dt * 6.0)
                 self.cursor_y += (self.H * 0.62 - self.cursor_y) * min(1.0, dt * 6.0)
                 self.selector_pos = self.cursor_x
                 self.dwell_timer = 0.0
-                if self.feedback_timer <= 0 and self._pending_new_problem:
-                    self._pending_new_problem = False
-                    self.generate_problem(speak_now=True)
+
+                if self._pending_new_problem:
+                    if self.feedback_timer <= 0:
+                        # Check if TTS announcement is still actively speaking
+                        if self.tts.is_speaking and self._tts_wait_timeout > 0:
+                            self._tts_wait_timeout -= dt
+                            self.feedback_timer = 0.15  # wait for announcement to complete
+                        elif not self._tts_finished:
+                            # Speech has finished! Give a calm breathing pause before next question
+                            self._tts_finished = True
+                            self.feedback_timer = 0.45
+                        else:
+                            # Calm pause completed! Generate new question
+                            self._pending_new_problem = False
+                            self._tts_finished = False
+                            self.feedback_timer = 0.0
+                            self.generate_problem(speak_now=True)
+                else:
+                    # On wrong answer, wait until speech finishes before unlocking controls
+                    if self.feedback_timer <= 0 and self.tts.is_speaking and self._tts_wait_timeout > 0:
+                        self._tts_wait_timeout -= dt
+                        self.feedback_timer = 0.15
             else:
                 if self._celebration is None:
                     self._update_controls(gs, dt)
@@ -1504,23 +1667,55 @@ class MathChoiceGame:
             self.screen.blit(s, s.get_rect(center=(int(pop.x) + ox, int(pop.y) + oy)))
 
     def _draw_feedback_banner(self) -> None:
-        """Render a high-contrast personalized appreciation / motivation banner."""
+        """Render a high-contrast personalized appreciation / motivation banner that dynamically fits its box."""
         sc = self.sc
-        bw = int(680 * sc)
-        bh = int(105 * sc)
         cx, cy = self.W // 2, int(self.H * 0.42)
+
+        # Sanitize text: strip non-ASCII glyphs (e.g. ★) that render as tofu □ boxes
+        raw_headline = self.feedback_headline or ""
+        headline = "".join(ch for ch in raw_headline if ord(ch) < 128).strip()
+        raw_subtext = self.feedback_subtext or ""
+        subtext = "".join(ch for ch in raw_subtext if ord(ch) < 128).strip()
+
+        # Target banner dimensions with room to grow slightly if text needs it
+        max_box_w = min(int(self.W * 0.92), int(860 * sc))
+        pad_x = int(32 * sc)
+        max_text_w = max_box_w - pad_x * 2
+
+        # Render headline & smoothly downscale if it exceeds max allowable width
+        h_surf = self.font_feedback.render(headline, True, self.feedback_color)
+        if h_surf.get_width() > max_text_w and h_surf.get_width() > 0:
+            scale_ratio = max_text_w / h_surf.get_width()
+            nw = int(h_surf.get_width() * scale_ratio)
+            nh = max(1, int(h_surf.get_height() * scale_ratio))
+            h_surf = pygame.transform.smoothscale(h_surf, (nw, nh))
+
+        # Render subtext & smoothly downscale if needed
+        s_surf = self.font_feedback_sub.render(subtext, True, TEXT_WHITE)
+        if s_surf.get_width() > max_text_w and s_surf.get_width() > 0:
+            scale_ratio = max_text_w / s_surf.get_width()
+            nw = int(s_surf.get_width() * scale_ratio)
+            nh = max(1, int(s_surf.get_height() * scale_ratio))
+            s_surf = pygame.transform.smoothscale(s_surf, (nw, nh))
+
+        # Dynamically size box to comfortably fit text with generous margin
+        bw = max(int(620 * sc), min(max_box_w, max(h_surf.get_width(), s_surf.get_width()) + pad_x * 2))
+        gap = int(10 * sc)
+        bh = max(int(105 * sc), h_surf.get_height() + s_surf.get_height() + int(36 * sc))
         rect = pygame.Rect(cx - bw // 2, cy - bh // 2, bw, bh)
 
+        # Draw rounded card with subtle backdrop
         panel = pygame.Surface((bw, bh), pygame.SRCALPHA)
         bg_rgba = (15, 45, 30, 235) if self.feedback_type == "correct" else (45, 35, 15, 235)
         pygame.draw.rect(panel, bg_rgba, panel.get_rect(), border_radius=int(18 * sc))
         self.screen.blit(panel, rect.topleft)
         pygame.draw.rect(self.screen, self.feedback_color, rect, max(2, int(3 * sc)), border_radius=int(18 * sc))
 
-        h_surf = self.font_feedback.render(self.feedback_headline, True, self.feedback_color)
-        s_surf = self.font_feedback_sub.render(self.feedback_subtext, True, TEXT_WHITE)
-        self.screen.blit(h_surf, h_surf.get_rect(center=(cx, cy - int(18 * sc))))
-        self.screen.blit(s_surf, s_surf.get_rect(center=(cx, cy + int(22 * sc))))
+        # Center both surfaces vertically and horizontally
+        total_text_h = h_surf.get_height() + gap + s_surf.get_height()
+        top_y = cy - total_text_h // 2
+        self.screen.blit(h_surf, h_surf.get_rect(centerx=cx, top=top_y))
+        self.screen.blit(s_surf, s_surf.get_rect(centerx=cx, top=top_y + h_surf.get_height() + gap))
 
     def _draw_top_hud(self) -> None:
         sc = self.sc
@@ -1553,15 +1748,19 @@ class MathChoiceGame:
         st_surf = self.font_badge.render(streak_txt, True, st_col)
         self.screen.blit(st_surf, st_surf.get_rect(center=(self.W // 2, pad + int(12 * sc))))
 
-        # Right: Voice TTS & Fullscreen & Mode shortcuts
+        # Right: Voice TTS & Optional AI Coach & Fullscreen shortcuts
         tts_lbl = "VOICE: ON [M]  •  REPEAT [S]" if self.tts.enabled else "VOICE: MUTED [M]"
         tts_col = NEON_GREEN if self.tts.enabled else TEXT_DIM
         tts_surf = self.font_small.render(tts_lbl, True, tts_col)
         self.screen.blit(tts_surf, tts_surf.get_rect(right=self.W - pad, top=pad))
 
+        ai_col = NEON_GREEN if self.llm_coach.enabled else (NEON_CYAN if self.llm_coach.available else TEXT_DIM)
+        ai_surf = self.font_small.render(self.llm_coach.status_label, True, ai_col)
+        self.screen.blit(ai_surf, ai_surf.get_rect(right=self.W - pad, top=pad + int(22 * sc)))
+
         ctrl_lbl = "LEVEL [L]  •  OPS [O]  •  FS [F]  •  ESC"
         ctrl_surf = self.font_small.render(ctrl_lbl, True, TEXT_DIM)
-        self.screen.blit(ctrl_surf, ctrl_surf.get_rect(right=self.W - pad, top=pad + int(24 * sc)))
+        self.screen.blit(ctrl_surf, ctrl_surf.get_rect(right=self.W - pad, top=pad + int(42 * sc)))
 
 
 def run(screen, clock, debug, mode, audio, username, interpreter):
