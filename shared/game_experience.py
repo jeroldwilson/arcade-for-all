@@ -329,10 +329,19 @@ class VisualEffects:
 # ── InactivityMonitor ─────────────────────────────────────────────────────────
 
 class InactivityMonitor:
-    def __init__(self, username: str, sensor=None, audio=None):
+    def __init__(self, username: str, sensor=None, audio=None, coach=None, tts=None):
         self.username             = username or "Player"
         self.sensor               = sensor
         self.audio                = audio
+        self._coach               = coach
+        if tts is not None:
+            self._tts = tts
+        else:
+            from shared.llm_coach import VoiceTTS
+            self._tts = VoiceTTS(enabled=True)
+        if self._coach is None:
+            from shared.llm_coach import QwenCoach
+            self._coach = QwenCoach(username=self.username, enabled=True)
         self.last_motion_time     = time.time()
         self.last_pulse_time      = 0.0
         self.last_encourage_time  = 0.0
@@ -350,9 +359,10 @@ class InactivityMonitor:
         self._led_blinking        = False
         self._pulse_count         = 0
         self._max_pulses          = 3
-        self._rest_haptic_delay   = 30.0
-        self._rest_haptic_interval = 15.0
+        self._rest_haptic_delay   = 15.0
+        self._rest_haptic_interval = 7.0
         self._last_rest_haptic_time = 0.0
+        self._use_audio_turn      = True
         self._font: Optional[pygame.font.Font] = None
         self._small_font: Optional[pygame.font.Font] = None
 
@@ -369,6 +379,7 @@ class InactivityMonitor:
         self.message = ""
         self._pulse_count = 0
         self._last_rest_haptic_time = 0.0
+        self._use_audio_turn = True
         self._stop_blinking()
 
     def _ensure_fonts(self) -> None:
@@ -383,12 +394,14 @@ class InactivityMonitor:
             self.message          = ""
             self._pulse_count     = 0
             self._last_rest_haptic_time = 0.0
+            self._use_audio_turn  = True
             self._stop_blinking()
             return None
         if is_moving:
             self.last_motion_time = now
             self._pulse_count     = 0
             self._last_rest_haptic_time = 0.0
+            self._use_audio_turn  = True
             self._stop_blinking()
             if self.is_paused:
                 self.is_paused = False
@@ -399,26 +412,46 @@ class InactivityMonitor:
                 self.message = ""
             return None
         inactive_dur = now - self.last_motion_time
-        if inactive_dur >= self._rest_haptic_delay and self.sensor is not None:
+        if inactive_dur >= self._rest_haptic_delay:
             if (self._last_rest_haptic_time == 0.0
                     or (now - self._last_rest_haptic_time) >= self._rest_haptic_interval):
                 self._last_rest_haptic_time = now
-                self.sensor.vibrate(0.2)
+                if self.sensor is not None:
+                    self.sensor.vibrate(0.2)
+
+                played_profile_audio = False
+                if self._use_audio_turn and self.audio is not None:
+                    played_profile_audio = bool(self.audio.play_encourage(self.username))
+
+                if played_profile_audio:
+                    self._use_audio_turn = False
+                else:
+                    ai_msg = None
+                    if self._coach is not None and getattr(self._coach, "enabled", False) and hasattr(self._coach, "get_message"):
+                        ai_msg = self._coach.get_message("motivate", context="Player is resting")
+                    fallbacks = [
+                        f"Come on {self.username}, you can do it!",
+                        f"Keep going {self.username}, make a move!",
+                        f"You've got this {self.username}, ready when you are!",
+                        f"Let's go {self.username}, show us your next move!",
+                    ]
+                    spoken = ai_msg or random.choice(fallbacks)
+                    if self._tts is not None:
+                        self._tts.speak(spoken, interrupt=True)
+                    if self.is_paused:
+                        self.message = spoken
+                    self._use_audio_turn = True
         if inactive_dur > self.pause_threshold:
             if not self.is_paused:
                 self.is_paused = True
-                self.message   = "PAUSED — MAKE A MOVE TO RESUME"
+                if not self.message:
+                    self.message = "PAUSED — MAKE A MOVE TO RESUME"
                 self._stop_blinking()
                 return "PAUSE"
         elif inactive_dur > self.inactivity_threshold and not self.is_paused:
             if not self.woke_up:
                 self.woke_up = True
                 self.wake_up_trigger_time = now
-            
-            # Play encourage audio with 50s cooldown
-            if self.audio and (now - self.last_encourage_time > 50.0):
-                self.last_encourage_time = now
-                self.audio.play_encourage(self.username)
 
             if now - self.last_pulse_time > self._pulse_interval:
                 self.last_pulse_time = now

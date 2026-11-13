@@ -43,6 +43,8 @@ from shared.game_experience import (
     NebulaBg, KatanaTrail, JuiceSplatter, ComboFlash, make_glow,
     GameExitAppreciationScreen, FireworksCelebration,
 )
+from shared.gesture import CONFIG_ACCESSIBLE, CONFIG_STANDARD
+from shared.llm_coach import QwenCoach, VoiceTTS
 from shared.assets import load_sprite, FRUIT_CATALOG
 
 if TYPE_CHECKING:
@@ -467,12 +469,14 @@ class FruitNinjaGame:
         username:     str  = "",
     ):
         self._clock        = clock
-        self._mode         = mode
+        self._mode         = "accessible" if mode in ("accessible", "astra") else ("standard" if mode in ("standard", "veera") else mode)
         self._audio        = audio
         self._debug        = debug
         self._username     = username
-        self.hud = GestureHUD("/Users/jerold/.gemini/antigravity-ide/brain/3c53c120-8bf4-4a05-a904-340edfef9b68/metamotion_kid_hand_flat_1788027714986.jpg", scale=0.3)
-        self._cfg          = _ACC if mode == "accessible" else _STD
+        self.hud = GestureHUD(scale=0.3)
+        self._tts          = VoiceTTS(enabled=True)
+        self._coach        = QwenCoach(username=self._username or "Champion", enabled=True, game_type="fruit_ninja")
+        self._cfg          = _ACC if self._mode == "accessible" else _STD
         self._game_submode = game_submode
         self._gesture_src  = None
         self._fruit_bag: List[dict] = []
@@ -559,17 +563,23 @@ class FruitNinjaGame:
 
     def run(self, gesture_src) -> str:
         self._gesture_src = gesture_src
+        if gesture_src and getattr(gesture_src, "config", None) is not None:
+            gesture_src.config = CONFIG_ACCESSIBLE if self._mode == "accessible" else CONFIG_STANDARD
 
         # Game Goals Selection
         goals_prompt = GameGoalsPrompt(self._screen, self._clock, mode=self._mode)
         self._goal = goals_prompt.run(gesture_src)
         if self._goal is None:
+            self._tts.stop()
             return "home"
         self._goal.start()
 
         # Sensor & Effects
         self._sensor     = getattr(gesture_src, "sensor", None)
-        self._inactivity = InactivityMonitor(self._username, self._sensor, self._audio)
+        self._inactivity = InactivityMonitor(
+            self._username, self._sensor, self._audio,
+            coach=self._coach, tts=self._tts,
+        )
         self._effects    = VisualEffects(self._sensor)
         self._nebula     = NebulaBg()
         self._katana     = KatanaTrail()
@@ -592,6 +602,7 @@ class FruitNinjaGame:
                 result = self._handle_events()
                 if result:
                     self._inactivity.cleanup()
+                    self._tts.stop()
                     if self._learner is not None:
                         self._learner.save_and_train()
                     if self._audio:
@@ -654,7 +665,10 @@ class FruitNinjaGame:
                     if current_milestone > last_milestone and self._score > 0:
                         from shared.game_experience import FireworksCelebration
                         self._celebration = FireworksCelebration(self._W, self._H, self._username, current_milestone * 1000)
+                        self._effects.trigger_fireworks(self._W // 2, self._H // 2)
                         self._last_celebrated_score = self._score
+                        msg = self._coach.get_message("success", context=f"Fruit Ninja milestone {current_milestone * 1000} points") if self._coach.enabled else None
+                        self._tts.speak(msg or f"Awesome {self._username or 'Champion'}! {current_milestone * 1000} points!", interrupt=True)
 
             self._draw()
             gs = self._gesture_src.get_state() if getattr(self, "_gesture_src", None) is not None else None
@@ -740,6 +754,9 @@ class FruitNinjaGame:
             self._switch_submode("play")
         elif key == pygame.K_l:
             self._switch_submode("learn")
+        elif key == pygame.K_q:
+            self._coach.toggle()
+            self._submode_toast = 2.5
         elif key == pygame.K_t:
             self._switch_submode("test")
         elif key == pygame.K_m:

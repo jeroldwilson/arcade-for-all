@@ -102,21 +102,50 @@ class TestPhase0SensorAndBugFixes(unittest.TestCase):
         fx.trigger_fireworks(100, 100)
         self.assertEqual(mock_sensor.vibrate.call_count, 1)
 
-        # InactivityMonitor vibrates only after >30s rest, then every 15s
+        # InactivityMonitor vibrates + motivates after >15s rest, then every 7s
         mock_sensor.vibrate.reset_mock()
-        mon = InactivityMonitor("Tester", sensor=mock_sensor)
-        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 20.0):
+        mock_tts = MagicMock()
+        mock_coach = MagicMock()
+        mock_coach.enabled = True
+        mock_coach.get_message.return_value = "Keep going Tester!"
+        mon = InactivityMonitor("Tester", sensor=mock_sensor, coach=mock_coach, tts=mock_tts)
+        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 10.0):
             mon.update(is_moving=False)
         self.assertEqual(mock_sensor.vibrate.call_count, 0)
-        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 31.0):
+        self.assertEqual(mock_tts.speak.call_count, 0)
+        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 16.0):
             mon.update(is_moving=False)
         self.assertEqual(mock_sensor.vibrate.call_count, 1)
-        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 40.0):
+        self.assertEqual(mock_tts.speak.call_count, 1)
+        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 20.0):
             mon.update(is_moving=False)
         self.assertEqual(mock_sensor.vibrate.call_count, 1)
-        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 47.0):
+        with patch("shared.game_experience.time.time", return_value=mon.last_motion_time + 24.0):
             mon.update(is_moving=False)
         self.assertEqual(mock_sensor.vibrate.call_count, 2)
+        self.assertEqual(mock_tts.speak.call_count, 2)
+
+        # When profile audio is available, alternate profile audio -> AI TTS
+        mock_audio = MagicMock()
+        mock_audio.play_encourage.return_value = True
+        mock_tts2 = MagicMock()
+        mon2 = InactivityMonitor("Tester", sensor=mock_sensor, audio=mock_audio, coach=mock_coach, tts=mock_tts2)
+        with patch("shared.game_experience.time.time", return_value=mon2.last_motion_time + 16.0):
+            mon2.update(is_moving=False)
+        self.assertEqual(mock_audio.play_encourage.call_count, 1)
+        self.assertEqual(mock_tts2.speak.call_count, 0)
+        with patch("shared.game_experience.time.time", return_value=mon2.last_motion_time + 24.0):
+            mon2.update(is_moving=False)
+        self.assertEqual(mock_audio.play_encourage.call_count, 1)
+        self.assertEqual(mock_tts2.speak.call_count, 1)
+
+        from shared.llm_coach import QwenCoach
+        fn_prompt = QwenCoach(username="Tester", enabled=False, game_type="fruit_ninja")._build_prompt("success", 3, False)
+        br_prompt = QwenCoach(username="Tester", enabled=False, game_type="bricks")._build_prompt("motivate", 1, False)
+        self.assertIn("fruit", fn_prompt.lower())
+        self.assertNotIn("math", fn_prompt.lower())
+        self.assertIn("brick", br_prompt.lower())
+        self.assertNotIn("math", br_prompt.lower())
 
 
 class TestPhase1ReplayHarness(unittest.TestCase):

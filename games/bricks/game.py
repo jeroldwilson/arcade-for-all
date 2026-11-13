@@ -44,6 +44,8 @@ from shared.game_experience import (
     GameGoalsPrompt, InactivityMonitor, VisualEffects,
     NebulaBg, StarField, make_glow,
 )
+from shared.gesture import CONFIG_ACCESSIBLE, CONFIG_STANDARD
+from shared.llm_coach import QwenCoach, VoiceTTS
 
 if TYPE_CHECKING:
     from shared.gesture import GestureState
@@ -215,12 +217,16 @@ class BricksGame:
         game_submode: str = "play",   # "play" | "learn" | "test"
     ):
         self._clock          = clock
-        self._mode           = mode
+        self._mode           = "accessible" if mode in ("accessible", "astra") else ("standard" if mode in ("standard", "veera") else mode)
         self._audio          = audio
         self._gesture_source = None
+        self._sensor         = None
         self._debug          = debug
         self._username       = username
         self.hud             = GestureHUD(scale=0.3)
+        self._tts            = VoiceTTS(enabled=True)
+        self._coach          = QwenCoach(username=self._username or "Champion", enabled=True, game_type="bricks")
+        self._inactivity     = None
         self._game_submode   = game_submode
         self._show_validation: bool = False
         self._sklearn_missing: bool = False
@@ -317,11 +323,21 @@ class BricksGame:
     def run(self, gesture_source) -> str:
         """Run the game loop. Returns 'home' when player exits to menu."""
         self._gesture_source = gesture_source
+        if gesture_source and getattr(gesture_source, "config", None) is not None:
+            gesture_source.config = CONFIG_ACCESSIBLE if self._mode == "accessible" else CONFIG_STANDARD
+
+        self._sensor = getattr(gesture_source, "sensor", None)
+        self._effects = VisualEffects(self._sensor)
+        self._inactivity = InactivityMonitor(
+            self._username, self._sensor, self._audio,
+            coach=self._coach, tts=self._tts,
+        )
 
         # Target selection screen
         goals_prompt = GameGoalsPrompt(self._screen, self._clock, mode=self._mode)
         self._goal = goals_prompt.run(gesture_source)
         if self._goal is None:
+            self._tts.stop()
             return "home"
 
         self._reset()
@@ -339,19 +355,45 @@ class BricksGame:
             else:
                 result = self._handle_events()
                 if result:
+                    if self._inactivity is not None:
+                        self._inactivity.cleanup()
+                    self._tts.stop()
                     if self._learner is not None:
                         self._learner.save_and_train()
                     if self._audio:
                         self._audio.stop_background()
                     return result
+
+                # Inactivity & >30s rest haptic monitoring
+                sig = gesture_source.signals() if (gesture_source and hasattr(gesture_source, "signals")) else None
+                keys = pygame.key.get_pressed()
+                is_moving = bool(keys[pygame.K_LEFT] or keys[pygame.K_RIGHT] or keys[pygame.K_SPACE])
+                if sig is not None and sig.calibrated:
+                    is_moving = is_moving or abs(sig.tilt_x) > 0.08 or math.hypot(sig.gx, sig.gy) > 10.0
+                is_manually_paused = (self._paused and not self._inactivity.is_paused) or self._game_over or self._you_win
+                action = self._inactivity.update(is_moving, is_manually_paused)
+                if action == "PAUSE":
+                    self._paused = True
+                    self._effects.trigger_pause()
+                    if self._audio:
+                        self._audio.pause_background()
+                elif action == "RESUME":
+                    self._paused = False
+                    self._effects.trigger_resume()
+                    if self._audio:
+                        self._audio.resume_background()
+
                 if not self._paused and not self._game_over and not self._you_win:
                     self._update(dt)
 
                     # Target limit check
                     if self._goal.check_met(self._score):
                         self._you_win = True
+                        self._effects.trigger_fireworks(self._W // 2, self._H // 2)
                         if self._audio:
                             self._audio.play_success(self._username)
+                        msg = self._coach.get_message("success", context=f"Bricks goal reached! Score {self._score}") if self._coach.enabled else None
+                        self._tts.speak(msg or f"Awesome job {self._username or 'Champion'}! You hit {self._score} points!", interrupt=True)
 
                     # Check for 1000 points milestone
                     current_milestone = self._score // 1000
@@ -359,7 +401,10 @@ class BricksGame:
                     if current_milestone > last_milestone and self._score > 0:
                         from shared.game_experience import FireworksCelebration
                         self._celebration = FireworksCelebration(self._W, self._H, self._username, current_milestone * 1000)
+                        self._effects.trigger_fireworks(self._W // 2, self._H // 2)
                         self._last_celebrated_score = self._score
+                        msg = self._coach.get_message("success", context=f"Bricks milestone {current_milestone * 1000} points") if self._coach.enabled else None
+                        self._tts.speak(msg or f"Way to go {self._username or 'Champion'}! {current_milestone * 1000} points!", interrupt=True)
 
             self._draw()
             gs = self._gesture_source.get_state() if getattr(self, "_gesture_source", None) is not None else None
@@ -489,6 +534,10 @@ class BricksGame:
             self._launch_all_inactive()
         elif key == pygame.K_f:
             self._toggle_fullscreen()
+        elif key == pygame.K_q:
+            enabled, msg = self._coach.toggle()
+            self._mode_toast_msg = msg
+            self._mode_toast = 2.5
         elif key == pygame.K_l:
             self._switch_submode("learn")
         elif key == pygame.K_t:
@@ -854,6 +903,8 @@ class BricksGame:
         self._draw_paddle()
         self._effects.update(dt)
         self._effects.draw(self._screen)
+        if self._inactivity is not None:
+            self._inactivity.draw(self._screen)
         self._draw_hud()
         if self._debug:
             self._draw_debug()

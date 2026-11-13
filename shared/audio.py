@@ -276,10 +276,10 @@ class AudioManager:
     def resume_background(self) -> None:
         pygame.mixer.music.unpause()
 
-    def play_encourage(self, username: str) -> None:
+    def play_encourage(self, username: str) -> bool:
         folder = AUDIO_DIR / "profiles" / username / "Encourage"
         if not folder.exists():
-            return
+            return False
         files = list(folder.glob("*.mp3"))
         if files:
             f = random.choice(files)
@@ -287,6 +287,8 @@ class AudioManager:
             pygame.mixer.music.pause()
             self._voice_channel.play(snd)
             self._is_encouraging = True
+            return True
+        return False
 
     def play_success(self, username: str) -> None:
         folder = AUDIO_DIR / "profiles" / username / "Success"
@@ -340,7 +342,7 @@ class _NullAudio:
     def stop_background(self)  -> None: pass
     def pause_background(self) -> None: pass
     def resume_background(self) -> None: pass
-    def play_encourage(self, u: str) -> None: pass
+    def play_encourage(self, u: str) -> bool: return False
     def play_success(self, u: str) -> None: pass
     def update(self) -> None: pass
     def play_collect(self)     -> None: pass

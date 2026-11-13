@@ -43,8 +43,10 @@ from shared.llm_coach import QwenCoach
 from shared.game_experience import (
     FireworksCelebration,
     GameExitAppreciationScreen,
+    InactivityMonitor,
     NebulaBg,
     StarField,
+    VisualEffects,
 )
 
 
@@ -312,7 +314,7 @@ class MathChoiceGame:
         self.debug = debug
         self._debug = debug
         # Normalize mode ("accessible" / "astra" vs "standard" / "veera" / "keyboard")
-        self.mode = "accessible" if mode in ("accessible", "astra") else mode
+        self.mode = "accessible" if mode in ("accessible", "astra") else ("standard" if mode in ("standard", "veera") else mode)
         self.audio = audio
         self.username = (username or "").strip()
         self.display_name = self.username if self.username else "Champion"
@@ -325,8 +327,13 @@ class MathChoiceGame:
         self._stars = StarField(n=90)
         self.hud = GestureHUD(scale=0.3)
         self.tts = MathTTS(enabled=True)
-        # Optional, toggleable Qwen 2.5 1.5B AI Coach (OFF by default; never overrides standard TTS unless toggled with Q)
-        self.llm_coach = QwenCoach(username=self.display_name, enabled=False)
+        # Qwen 2.5 1.5B AI Coach (enabled by default when local backend is available; toggle with Q)
+        self.llm_coach = QwenCoach(username=self.display_name, enabled=True)
+        self._effects = VisualEffects()
+        self._inactivity = InactivityMonitor(
+            self.display_name, None, self.audio,
+            coach=self.llm_coach, tts=self.tts,
+        )
         self._question_start_time = time.monotonic()
         self._consecutive_misses = 0
 
@@ -628,6 +635,7 @@ class MathChoiceGame:
                 self.level2_misses = 0
                 level_up_occurred = True
                 self._celebration = FireworksCelebration(self.W, self.H, self.display_name, self.score)
+                self._effects.trigger_fireworks(self.W // 2, self.H // 2)
                 self._spawn_explosion(self.W // 2, int(self.H * 0.45), NEON_MAGENTA, count=65)
         else:
             self.level2_misses = 0
@@ -714,6 +722,7 @@ class MathChoiceGame:
         last_ms = self._last_celebrated_score // 1000
         if cur_ms > last_ms and self.score > 0 and not level_up_occurred:
             self._celebration = FireworksCelebration(self.W, self.H, self.display_name, cur_ms * 1000)
+            self._effects.trigger_fireworks(self.W // 2, self.H // 2)
             self._last_celebrated_score = self.score
 
     def handle_wrong(self, side: str, target_pos: Tuple[int, int]) -> None:
@@ -1071,6 +1080,9 @@ class MathChoiceGame:
 
     def run(self, interpreter) -> str:
         self.gesture_src = interpreter
+        sensor = getattr(interpreter, "sensor", None)
+        self._effects.sensor = sensor
+        self._inactivity.sensor = sensor
         if interpreter and getattr(interpreter, "config", None) is not None:
             if self.mode == "accessible":
                 interpreter.config = CONFIG_ACCESSIBLE_FLICK_STEER
@@ -1097,12 +1109,14 @@ class MathChoiceGame:
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
+                    self._inactivity.cleanup()
                     self.tts.stop()
                     if self.audio:
                         self.audio.stop_background()
                     return "quit"
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
+                        self._inactivity.cleanup()
                         self.tts.stop()
                         if self.audio:
                             self.audio.stop_background()
@@ -1250,6 +1264,13 @@ class MathChoiceGame:
             else:
                 if self._celebration is None:
                     self._update_controls(gs, dt)
+
+            # Inactivity & >30s rest haptic monitoring
+            sig = self.gesture_src.signals() if (self.gesture_src and hasattr(self.gesture_src, "signals")) else None
+            is_moving = self._active_input_mode in ("MOVE", "TILT", "KEYS", "MOUSE")
+            if sig is not None and sig.calibrated:
+                is_moving = is_moving or abs(sig.tilt_x) > 0.08 or math.hypot(sig.gx, sig.gy) > 10.0
+            self._inactivity.update(is_moving, is_manually_paused=self.feedback_timer > 0)
 
             # ── RENDER ────────────────────────────────────────────────────────
             self._draw(gs)
