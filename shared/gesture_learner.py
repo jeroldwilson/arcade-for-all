@@ -60,7 +60,7 @@ except ImportError:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Schema version — increment when feature format changes (old records are skipped)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Rolling pre-trigger buffer: 60 frames @ ~60 Hz ≈ 1000 ms look-back
 # Increased for accessible needs to capture slower, wider movement arcs
@@ -105,12 +105,13 @@ PROFILE_STANDARD   = GestureProfile(
 
 # ACCESSIBLE profile customized for kids with movement disabilities / CP:
 # - Lower motion minimum so weak movements trigger
-# - Extremely high erratic max so tremors/spasms are learned, not rejected
+# - Erratic bursts above erratic_std_max are recorded as the 'involuntary' class
+#   for Stage-1 gating (fixes the erratic_std_max=999 bug noted in roadmap §4.10)
 # - 0.0 ambiguity margin: accepts diagonal/arcing motions
 # - Longer cooldown: prevents multiple triggers from a single long spasm
 PROFILE_ACCESSIBLE = GestureProfile(
     dead_zone=6.0,  confidence_threshold=0.45, smoothing_frames=6, max_speed_scale=0.75,
-    motion_mag_min=12.0, erratic_std_max=999.0, ambiguity_margin=0.0, cooldown_secs=1.5
+    motion_mag_min=12.0, erratic_std_max=220.0, ambiguity_margin=0.0, cooldown_secs=1.5
 )
 
 
@@ -123,7 +124,10 @@ class IMUSnapshot:
     gx: float; gy: float; gz: float      # gyro °/s (raw)
     ax: float; ay: float; az: float      # accel g (low-pass filtered ≈ gravity)
     euler_roll:  float = 0.0             # degrees — stable, gravity-referenced
-    euler_pitch: float = 0.0            # degrees — stable, gravity-referenced
+    euler_pitch: float = 0.0             # degrees — stable, gravity-referenced
+    lin_ax: float = 0.0                  # gravity-removed linear accel (g)
+    lin_ay: float = 0.0
+    lin_az: float = 0.0
 
 
 class GestureBuffer:
@@ -148,105 +152,182 @@ class GestureBuffer:
 
 # ── Feature extraction ────────────────────────────────────────────────────────
 
+def _spectral_features(signal: List[float], fs: float) -> Tuple[float, float]:
+    """Compute (band_energy_ratio_0.3_to_2Hz, normalised_spectral_entropy) (§7.7).
+
+    Uses a pure-Python Hann-windowed real DFT so it works even if numpy is absent,
+    and uses numpy.fft.rfft when available for speed.
+    """
+    n = len(signal)
+    if n < 4 or fs <= 0:
+        return 0.0, 0.0
+    mean = sum(signal) / n
+    centered = [
+        (signal[i] - mean) * (0.5 - 0.5 * math.cos(2.0 * math.pi * i / (n - 1)))
+        for i in range(n)
+    ]
+    try:
+        import numpy as np
+        power = (np.abs(np.fft.rfft(centered)) ** 2).tolist()
+        freqs = np.fft.rfftfreq(n, d=1.0 / fs).tolist()
+    except Exception:
+        k_max = n // 2 + 1
+        power = []
+        freqs = []
+        for k in range(k_max):
+            re = sum(centered[i] * math.cos(2.0 * math.pi * k * i / n) for i in range(n))
+            im = sum(centered[i] * math.sin(2.0 * math.pi * k * i / n) for i in range(n))
+            power.append(re * re + im * im)
+            freqs.append(k * fs / n)
+
+    total_p = sum(power)
+    if total_p <= 1e-12 or len(power) <= 1:
+        return 0.0, 0.0
+    low_band = sum(p for p, f in zip(power, freqs) if 0.3 <= f <= 2.0) / total_p
+    probs = [p / total_p for p in power]
+    entropy = -sum(p * math.log(p + 1e-12) for p in probs) / math.log(len(probs))
+    return float(low_band), float(max(0.0, min(1.0, entropy)))
+
+
+def features(window: List[IMUSnapshot], fs: float = 60.0) -> Optional[List[float]]:
+    """Pure feature extraction shared by training & live inference (roadmap §7.7).
+
+     accepts either IMUSnapshot or Frame objects.  Returns 44 features (38 classic
+    + 6 dyskinesia/spasm-discrimination features from §7.7).
+    """
+    if len(window) < 3:
+        return None
+
+    n = len(window)
+    # Estimate sample rate from timestamps when monotonic and valid
+    t_span = getattr(window[-1], "t", 0.0) - getattr(window[0], "t", 0.0)
+    if t_span > 1e-3 and n > 3:
+        est_fs = (n - 1) / t_span
+        if 10.0 <= est_fs <= 250.0:
+            fs = est_fs
+
+    gx_v = [s.gx for s in window]
+    gy_v = [s.gy for s in window]
+    gz_v = [s.gz for s in window]
+    ax_v = [getattr(s, "ax", getattr(s, "tilt_gx", 0.0)) for s in window]
+    ay_v = [getattr(s, "ay", getattr(s, "tilt_gy", 0.0)) for s in window]
+    az_v = [getattr(s, "az", 1.0) for s in window]
+
+    feats: List[float] = []
+
+    # Per-channel stats: mean, std, max_abs  (6 × 3 = 18)
+    for vals in (gx_v, gy_v, gz_v, ax_v, ay_v, az_v):
+        mean = sum(vals) / n
+        std = math.sqrt(sum((v - mean) ** 2 for v in vals) / n)
+        mabs = max(abs(v) for v in vals)
+        feats.extend([mean, std, mabs])
+
+    # Gyro magnitude stats  (4)
+    gmags = [math.sqrt(s.gx**2 + s.gy**2 + s.gz**2) for s in window]
+    gm_mean = sum(gmags) / n
+    gm_std = math.sqrt(sum((v - gm_mean) ** 2 for v in gmags) / n)
+    gm_max = max(gmags)
+    gm_rng = gm_max - min(gmags)
+    feats.extend([gm_mean, gm_std, gm_max, gm_rng])
+
+    # Dominant gyro angle  (1)
+    mean_gy = sum(gy_v) / n
+    mean_gz = sum(gz_v) / n
+    feats.append(math.atan2(mean_gy, mean_gz))
+
+    # Energy: gyro RMS, accel RMS  (2)
+    feats.append(math.sqrt(sum(s.gx**2 + s.gy**2 + s.gz**2 for s in window) / n))
+    feats.append(math.sqrt(sum(ax_v[i]**2 + ay_v[i]**2 + az_v[i]**2 for i in range(n)) / n))
+
+    # Jerk: abs mean of adjacent-frame differences  (3)
+    if n > 1:
+        jerk_gx = sum(abs(gx_v[i] - gx_v[i - 1]) for i in range(1, n)) / (n - 1)
+        jerk_gy = sum(abs(gy_v[i] - gy_v[i - 1]) for i in range(1, n)) / (n - 1)
+        jerk_gz = sum(abs(gz_v[i] - gz_v[i - 1]) for i in range(1, n)) / (n - 1)
+    else:
+        jerk_gx = jerk_gy = jerk_gz = 0.0
+    feats.extend([jerk_gx, jerk_gy, jerk_gz])
+
+    # Zero crossings: gz, gy  (2)
+    feats.append(float(sum(1 for i in range(1, n) if gz_v[i - 1] * gz_v[i] < 0)))
+    feats.append(float(sum(1 for i in range(1, n) if gy_v[i - 1] * gy_v[i] < 0)))
+
+    # Peak timing fraction  (1)
+    peak_idx = max(range(n), key=lambda i: gmags[i])
+    feats.append(peak_idx / max(n - 1, 1))
+
+    # Signed area (integral approx)  (3)
+    feats.append(sum(gz_v))
+    feats.append(sum(gy_v))
+    feats.append(sum(gx_v))
+
+    # Dominant axis ratio  (1)
+    eps = 1e-6
+    feats.append(abs(mean_gz) / (abs(mean_gz) + abs(mean_gy) + eps))
+
+    # Euler orientation means  (2)
+    rolls = [getattr(s, "euler_roll", getattr(s, "roll", 0.0)) for s in window]
+    pitches = [getattr(s, "euler_pitch", getattr(s, "pitch", 0.0)) for s in window]
+    feats.append(sum(rolls) / n)
+    feats.append(sum(pitches) / n)
+
+    # Gyro magnitude at peak frame  (1)
+    feats.append(gmags[peak_idx])
+
+    # ── Roadmap §7.7 features (intentional vs involuntary movement)  (6) ──
+    dt = 1.0 / max(fs, 1.0)
+    lin_mags = [
+        math.sqrt(
+            getattr(s, "lin_ax", 0.0) ** 2
+            + getattr(s, "lin_ay", 0.0) ** 2
+            + getattr(s, "lin_az", 0.0) ** 2
+        )
+        for s in window
+    ]
+    # Use linear accel if populated, otherwise raw accel diffs for RMS jerk
+    if any(m > 1e-6 for m in lin_mags):
+        jerk_sq = [
+            ((getattr(window[i], "lin_ax", 0.0) - getattr(window[i - 1], "lin_ax", 0.0)) / dt) ** 2
+            + ((getattr(window[i], "lin_ay", 0.0) - getattr(window[i - 1], "lin_ay", 0.0)) / dt) ** 2
+            + ((getattr(window[i], "lin_az", 0.0) - getattr(window[i - 1], "lin_az", 0.0)) / dt) ** 2
+            for i in range(1, n)
+        ]
+    else:
+        jerk_sq = [
+            ((ax_v[i] - ax_v[i - 1]) / dt) ** 2
+            + ((ay_v[i] - ay_v[i - 1]) / dt) ** 2
+            + ((az_v[i] - az_v[i - 1]) / dt) ** 2
+            for i in range(1, n)
+        ]
+    rms_jerk = math.sqrt(sum(jerk_sq) / max(len(jerk_sq), 1))
+    low_band_ratio, spec_entropy = _spectral_features(gmags, fs)
+    speed_peaks = float(
+        sum(
+            1
+            for i in range(1, n - 1)
+            if gmags[i] > gmags[i - 1] and gmags[i] > gmags[i + 1] and gmags[i] > 15.0
+        )
+    )
+    lin_mean = sum(lin_mags) / n
+    lin_std = math.sqrt(sum((v - lin_mean) ** 2 for v in lin_mags) / n)
+    feats.extend([rms_jerk, low_band_ratio, spec_entropy, speed_peaks, lin_mean, lin_std])
+
+    assert len(feats) == FeatureExtractor.N_FEATURES, (
+        f"Feature count mismatch: expected {FeatureExtractor.N_FEATURES}, got {len(feats)}"
+    )
+    return feats
+
+
 class FeatureExtractor:
     """
-    Converts a list of IMUSnapshot into a fixed-length 38-feature vector.
-
-    Index  Description
-    ─────  ──────────────────────────────────────────────────────────────
-     0-17  Per-channel mean/std/max_abs for gx,gy,gz,ax,ay,az   (6×3=18)
-    18-21  Gyro magnitude mean/std/max/range                      (4)
-      22   Dominant gyro angle atan2(mean_gy, mean_gz)            (1)
-    23-24  Gyro RMS, accel RMS (energy)                           (2)
-    25-27  Jerk: abs mean of frame-to-frame diffs for gx,gy,gz   (3)
-    28-29  Zero crossings: gz, gy                                 (2)
-      30   Peak timing fraction (peak_idx / (n-1))                (1)
-    31-33  Signed area: sum(gz), sum(gy), sum(gx)                 (3)
-      34   Dominant axis ratio abs(gz)/(abs(gz)+abs(gy)+eps)      (1)
-    35-36  Euler roll mean, pitch mean                            (2)
-      37   Gyro magnitude at peak frame                           (1)
-    ─────  ─────────────────────────────────────────────────────────────
-           Total: 38
+    Converts a list of IMUSnapshot (or Frame) into a fixed-length 44-feature vector
+    (38 classic + 6 dyskinesia/spasm features from roadmap §7.7).
     """
 
-    N_FEATURES = 38
+    N_FEATURES = 44
 
-    def extract(self, window: List[IMUSnapshot]) -> Optional[List[float]]:
-        if len(window) < 3:
-            return None
-
-        n = len(window)
-        gx_v = [s.gx for s in window]
-        gy_v = [s.gy for s in window]
-        gz_v = [s.gz for s in window]
-        ax_v = [s.ax for s in window]
-        ay_v = [s.ay for s in window]
-        az_v = [s.az for s in window]
-
-        feats: List[float] = []
-
-        # Per-channel stats: mean, std, max_abs  (6 × 3 = 18)
-        for vals in (gx_v, gy_v, gz_v, ax_v, ay_v, az_v):
-            mean = sum(vals) / n
-            std  = math.sqrt(sum((v - mean) ** 2 for v in vals) / n)
-            mabs = max(abs(v) for v in vals)
-            feats.extend([mean, std, mabs])
-
-        # Gyro magnitude stats  (4)
-        gmags   = [math.sqrt(s.gx**2 + s.gy**2 + s.gz**2) for s in window]
-        gm_mean = sum(gmags) / n
-        gm_std  = math.sqrt(sum((v - gm_mean) ** 2 for v in gmags) / n)
-        gm_max  = max(gmags)
-        gm_rng  = gm_max - min(gmags)
-        feats.extend([gm_mean, gm_std, gm_max, gm_rng])
-
-        # Dominant gyro angle  (1)
-        mean_gy = sum(gy_v) / n
-        mean_gz = sum(gz_v) / n
-        feats.append(math.atan2(mean_gy, mean_gz))
-
-        # Energy: gyro RMS, accel RMS  (2)
-        feats.append(math.sqrt(sum(s.gx**2 + s.gy**2 + s.gz**2 for s in window) / n))
-        feats.append(math.sqrt(sum(s.ax**2 + s.ay**2 + s.az**2 for s in window) / n))
-
-        # ── Temporal features ──────────────────────────────────────────────
-
-        # Jerk: abs mean of adjacent-frame differences  (3)
-        if n > 1:
-            jerk_gx = sum(abs(gx_v[i] - gx_v[i-1]) for i in range(1, n)) / (n - 1)
-            jerk_gy = sum(abs(gy_v[i] - gy_v[i-1]) for i in range(1, n)) / (n - 1)
-            jerk_gz = sum(abs(gz_v[i] - gz_v[i-1]) for i in range(1, n)) / (n - 1)
-        else:
-            jerk_gx = jerk_gy = jerk_gz = 0.0
-        feats.extend([jerk_gx, jerk_gy, jerk_gz])
-
-        # Zero crossings: gz, gy  (2)
-        feats.append(float(sum(1 for i in range(1, n) if gz_v[i-1] * gz_v[i] < 0)))
-        feats.append(float(sum(1 for i in range(1, n) if gy_v[i-1] * gy_v[i] < 0)))
-
-        # Peak timing fraction  (1)
-        peak_idx = max(range(n), key=lambda i: gmags[i])
-        feats.append(peak_idx / max(n - 1, 1))
-
-        # Signed area (integral approx)  (3)
-        feats.append(sum(gz_v))
-        feats.append(sum(gy_v))
-        feats.append(sum(gx_v))
-
-        # Dominant axis ratio  (1)
-        eps = 1e-6
-        feats.append(abs(mean_gz) / (abs(mean_gz) + abs(mean_gy) + eps))
-
-        # Euler orientation means  (2)
-        feats.append(sum(s.euler_roll  for s in window) / n)
-        feats.append(sum(s.euler_pitch for s in window) / n)
-
-        # Gyro magnitude at peak frame  (1)
-        feats.append(gmags[peak_idx])
-
-        assert len(feats) == self.N_FEATURES, \
-            f"Feature count mismatch: expected {self.N_FEATURES}, got {len(feats)}"
-        return feats
+    def extract(self, window: List[IMUSnapshot], fs: float = 60.0) -> Optional[List[float]]:
+        return features(window, fs=fs)
 
 
 # ── Intent labelling ──────────────────────────────────────────────────────────
@@ -366,7 +447,8 @@ class SmartRecorder:
         mags   = [math.sqrt(s.gx**2 + s.gy**2 + s.gz**2) for s in window]
         mean_m = sum(mags) / len(mags)
         std_m  = math.sqrt(sum((v - mean_m) ** 2 for v in mags) / len(mags))
-        if std_m > profile.erratic_std_max:
+        erratic = std_m > profile.erratic_std_max
+        if erratic and mode != "accessible":
             return False
 
         # Event-centering: extract window centered on motion peak
@@ -381,13 +463,18 @@ class SmartRecorder:
         if features is None:
             return False
 
-        label = IntentLabeler.label(
-            blade_xy, fruits_xy,
-            blade_history=list(self._blade_history),
-            ambiguity_margin=profile.ambiguity_margin
-        )
-        if label is None:
-            return False
+        if erratic:
+            # Accessible mode: capture erratic bursts as the 'involuntary' class
+            # for Stage-1 gating rather than mislabelling them as directional gestures
+            label = "involuntary"
+        else:
+            label = IntentLabeler.label(
+                blade_xy, fruits_xy,
+                blade_history=list(self._blade_history),
+                ambiguity_margin=profile.ambiguity_margin
+            )
+            if label is None:
+                return False
 
         quality = {"gyro_peak": mags[peak_idx], "gyro_mean": mean_m, "gyro_std": std_m}
 
@@ -406,6 +493,47 @@ class SmartRecorder:
 
         if not self.class_balance_ok:
             print(f"[gesture_learner] Class imbalance warning: {self._class_counts}")
+        return True
+
+    def record_labeled_window(
+        self,
+        label: str,
+        session_id: str = "",
+        mode: str = "accessible",
+    ) -> bool:
+        """Carer tap-to-label (roadmap §8 Phase 7): record current buffer window with explicit label.
+
+        Supports Stage-1 labels ('rest', 'intentional', 'involuntary') or
+        Stage-2 directional labels ('right', 'left', 'up', 'down').
+        """
+        window = self._buf.snapshot()
+        if len(window) < 6:
+            return False
+        mags = [math.sqrt(s.gx**2 + s.gy**2 + s.gz**2) for s in window]
+        peak_idx = max(range(len(mags)), key=lambda i: mags[i])
+        half = EVENT_FRAMES // 2
+        start = max(0, peak_idx - half)
+        end = min(len(window), start + EVENT_FRAMES)
+        start = max(0, end - EVENT_FRAMES)
+        centered = window[start:end]
+        feats = self._extractor.extract(centered)
+        if feats is None:
+            return False
+        mean_m = sum(mags) / len(mags)
+        std_m = math.sqrt(sum((v - mean_m) ** 2 for v in mags) / len(mags))
+        now = time.monotonic()
+        self.recordings.append({
+            "schema_version": SCHEMA_VERSION,
+            "algorithm": "RandomForest",
+            "features": feats,
+            "label": label,
+            "time": now,
+            "session_id": session_id,
+            "mode": mode,
+            "quality": {"gyro_peak": mags[peak_idx], "gyro_mean": mean_m, "gyro_std": std_m, "manual": True},
+        })
+        self._class_counts[label] = self._class_counts.get(label, 0) + 1
+        self._last_rec = now
         return True
 
     def clear(self) -> None:
@@ -481,17 +609,36 @@ class GestureDataset:
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
+def _to_stage1_label(label: str) -> str:
+    """Map any dataset label into Stage-1 classes: 'rest' | 'involuntary' | 'intentional'."""
+    if label in ("rest", "involuntary"):
+        return label
+    return "intentional"
+
+
 class GestureModel:
-    """Probabilistic RandomForest with calibrated confidence and abstain support."""
+    """Two-stage probabilistic RandomForest (roadmap §7.8) with confidence abstain.
+
+    Stage 1 (optional, trained when 'rest' or 'involuntary' samples exist):
+        classifies window as 'rest' | 'intentional' | 'involuntary'.
+    Stage 2:
+        classifies intentional window into directional gesture ('right'|'left'|'up'|'down').
+    """
 
     def __init__(self, data_dir: Path = DATA_DIR, confidence_threshold: float = 0.55):
         self.MODEL_PATH           = data_dir / "model.pkl"
+        self.STAGE1_PATH          = data_dir / "model_stage1.pkl"
         self._clf                 = None
+        self._stage1_clf          = None
         self.confidence_threshold = confidence_threshold
 
     @property
     def ready(self) -> bool:
-        return self._clf is not None and SKLEARN_AVAILABLE
+        return getattr(self, "_clf", None) is not None and SKLEARN_AVAILABLE
+
+    @property
+    def stage1_ready(self) -> bool:
+        return getattr(self, "_stage1_clf", None) is not None and SKLEARN_AVAILABLE
 
     def set_confidence_threshold(self, threshold: float) -> None:
         self.confidence_threshold = threshold
@@ -503,11 +650,31 @@ class GestureModel:
         if len(X) < MIN_TRAIN_SAMPLES:
             return False
         try:
+            # Stage 1: train rest / intentional / involuntary gate if non-intentional classes exist
+            y_s1 = [_to_stage1_label(lbl) for lbl in y]
+            if len(set(y_s1)) >= 2:
+                s1 = RandomForestClassifier(
+                    n_estimators=60, max_depth=8,
+                    class_weight="balanced", random_state=42,
+                )
+                s1.fit(X, y_s1)
+                self._stage1_clf = s1
+            else:
+                self._stage1_clf = None
+
+            # Stage 2: train directional gesture classifier on intentional directional samples
+            dir_pairs = [(x, lbl) for x, lbl in zip(X, y) if lbl in DIRECTIONS]
+            if len(dir_pairs) >= max(4, MIN_TRAIN_SAMPLES // 2) and len({lbl for _, lbl in dir_pairs}) >= 2:
+                X_dir = [p[0] for p in dir_pairs]
+                y_dir = [p[1] for p in dir_pairs]
+            else:
+                X_dir, y_dir = X, y
+
             clf = RandomForestClassifier(
                 n_estimators=60, max_depth=8,
                 class_weight="balanced", random_state=42,
             )
-            clf.fit(X, y)
+            clf.fit(X_dir, y_dir)
             self._clf = clf
             self._save()
             return True
@@ -515,22 +682,43 @@ class GestureModel:
             print(f"[gesture_learner] Training failed: {exc}")
             return False
 
+    def predict_stage1(self, feat: List[float]) -> Tuple[str, float]:
+        """Return ('rest'|'intentional'|'involuntary', confidence)."""
+        s1 = getattr(self, "_stage1_clf", None)
+        if s1 is None or not SKLEARN_AVAILABLE:
+            return "intentional", 1.0
+        try:
+            proba = s1.predict_proba([feat])[0]
+            best_idx = int(max(range(len(proba)), key=lambda i: proba[i]))
+            return str(s1.classes_[best_idx]), float(proba[best_idx])
+        except Exception:
+            return "intentional", 1.0
+
     def predict_with_confidence(
         self, features: List[float],
     ) -> Tuple[Optional[str], float]:
         """
         Returns (direction, confidence) or (None, confidence) to abstain.
-        Abstains when confidence is below threshold or sklearn unavailable.
+        Abstains when Stage 1 predicts rest/involuntary or when Stage 2 confidence
+        is below threshold.
         """
-        if self._clf is None or not SKLEARN_AVAILABLE:
+        if getattr(self, "_clf", None) is None or not SKLEARN_AVAILABLE:
             return None, 0.0
         try:
+            if getattr(self, "_stage1_clf", None) is not None:
+                s1_label, s1_conf = self.predict_stage1(features)
+                if s1_label != "intentional" or s1_conf < self.confidence_threshold:
+                    return None, s1_conf
+
             proba    = self._clf.predict_proba([features])[0]
             best_idx = int(max(range(len(proba)), key=lambda i: proba[i]))
             conf     = float(proba[best_idx])
             if conf < self.confidence_threshold:
                 return None, conf
-            return str(self._clf.classes_[best_idx]), conf
+            lbl = str(self._clf.classes_[best_idx])
+            if lbl in ("rest", "involuntary"):
+                return None, conf
+            return lbl, conf
         except Exception:
             return None, 0.0
 
@@ -544,6 +732,10 @@ class GestureModel:
             import pickle
             with open(self.MODEL_PATH, "wb") as f:
                 pickle.dump(self._clf, f)
+            s1_path = getattr(self, "STAGE1_PATH", self.MODEL_PATH.parent / "model_stage1.pkl")
+            if getattr(self, "_stage1_clf", None) is not None:
+                with open(s1_path, "wb") as f:
+                    pickle.dump(self._stage1_clf, f)
         except Exception as exc:
             print(f"[gesture_learner] Save failed: {exc}")
 
@@ -554,7 +746,6 @@ class GestureModel:
             import pickle
             with open(self.MODEL_PATH, "rb") as f:
                 clf = pickle.load(f)
-            # Discard model if feature count no longer matches extractor
             expected = FeatureExtractor.N_FEATURES
             if hasattr(clf, 'n_features_in_') and clf.n_features_in_ != expected:
                 print(
@@ -563,6 +754,12 @@ class GestureModel:
                 )
                 return False
             self._clf = clf
+            s1_path = getattr(self, "STAGE1_PATH", self.MODEL_PATH.parent / "model_stage1.pkl")
+            if s1_path.exists():
+                with open(s1_path, "rb") as f:
+                    s1 = pickle.load(f)
+                if not hasattr(s1, "n_features_in_") or s1.n_features_in_ == expected:
+                    self._stage1_clf = s1
             print("[gesture_learner] Loaded existing model.")
             return True
         except Exception as exc:
@@ -586,8 +783,12 @@ class ValidationResult:
     weakest_class: str                    # direction with lowest F1
     fp_rate: float = 0.0                  # macro-averaged false positive rate
     abstain_rate: float = 0.0             # fraction of CV test samples that abstained
-    latency_ms: float = 0.0              # estimated per-prediction latency (ms)
+    latency_ms: float = 0.0               # estimated per-prediction latency (ms)
     cv_folds_used: int = 0
+    # Roadmap Phase 7: false-trigger rates (events/min) during rest and spasms
+    rest_false_triggers_per_min: float = 0.0
+    spasm_false_triggers_per_min: float = 0.0
+    stage1_accuracy: float = 0.0
     error: str = ""
 
 
@@ -662,6 +863,10 @@ class GestureValidator:
 
         all_true:    List[str] = []
         all_pred:    List[str] = []
+        s1_true:     List[str] = []
+        s1_pred:     List[str] = []
+        rest_total = rest_false_triggers = 0
+        spasm_total = spasm_false_triggers = 0
         abstain_count = 0
         latencies:   List[float] = []
         folds_used   = 0
@@ -676,21 +881,67 @@ class GestureValidator:
                 continue
 
             try:
+                y_train_s1 = [_to_stage1_label(lbl) for lbl in y_train]
+                s1_clf = None
+                if len(set(y_train_s1)) >= 2:
+                    s1_clf = RandomForestClassifier(
+                        n_estimators=30, max_depth=8,
+                        class_weight="balanced", random_state=42,
+                    )
+                    s1_clf.fit(X_train, y_train_s1)
+
+                dir_train = [(x, lbl) for x, lbl in zip(X_train, y_train) if lbl in DIRECTIONS]
+                if len(dir_train) >= 2 and len({lbl for _, lbl in dir_train}) >= 2:
+                    X_tr_d = [p[0] for p in dir_train]
+                    y_tr_d = [p[1] for p in dir_train]
+                else:
+                    X_tr_d, y_tr_d = X_train, y_train
+
                 clf = RandomForestClassifier(
                     n_estimators=30, max_depth=8,
                     class_weight="balanced", random_state=42,
                 )
-                clf.fit(X_train, y_train)
+                clf.fit(X_tr_d, y_tr_d)
 
                 t0 = time.monotonic()
                 for feat, true_lbl in zip(X_test, y_test):
+                    true_s1 = _to_stage1_label(true_lbl)
+                    pred_s1 = "intentional"
+                    conf_s1 = 1.0
+                    if s1_clf is not None:
+                        p1 = s1_clf.predict_proba([feat])[0]
+                        b1 = int(max(range(len(p1)), key=lambda j: p1[j]))
+                        pred_s1 = str(s1_clf.classes_[b1])
+                        conf_s1 = float(p1[b1])
+                        s1_true.append(true_s1)
+                        s1_pred.append(pred_s1)
+
                     proba    = clf.predict_proba([feat])[0]
                     best_idx = int(max(range(len(proba)), key=lambda j: proba[j]))
                     conf     = float(proba[best_idx])
-                    if conf < 0.55:
+                    pred_dir = str(clf.classes_[best_idx])
+
+                    # Would the two-stage pipeline emit a gesture event?
+                    triggered = (
+                        pred_s1 == "intentional"
+                        and conf_s1 >= 0.55
+                        and conf >= 0.55
+                        and pred_dir in DIRECTIONS
+                    )
+                    if true_lbl == "rest":
+                        rest_total += 1
+                        if triggered:
+                            rest_false_triggers += 1
+                        continue
+                    if true_lbl == "involuntary":
+                        spasm_total += 1
+                        if triggered:
+                            spasm_false_triggers += 1
+                        continue
+
+                    if conf < 0.55 or pred_s1 != "intentional":
                         abstain_count += 1
-                    # Include in metrics regardless of abstain (abstain = low-confidence pred)
-                    all_pred.append(str(clf.classes_[best_idx]))
+                    all_pred.append(pred_dir)
                     all_true.append(true_lbl)
                 t1 = time.monotonic()
                 if X_test:
@@ -749,6 +1000,11 @@ class GestureValidator:
                 weakest_class = d
 
         fp_rate = sum(fp_rates) / len(fp_rates) if fp_rates else 0.0
+        # Each window covers EVENT_FRAMES / 60 s ≈ 0.6 s → 100 windows/min
+        windows_per_min = 60.0 / max(EVENT_FRAMES / 60.0, 0.1)
+        rest_fpm = (rest_false_triggers / rest_total * windows_per_min) if rest_total > 0 else 0.0
+        spasm_fpm = (spasm_false_triggers / spasm_total * windows_per_min) if spasm_total > 0 else 0.0
+        s1_acc = (sum(t == p for t, p in zip(s1_true, s1_pred)) / len(s1_true)) if s1_true else 1.0
 
         return ValidationResult(
             overall_accuracy=overall_accuracy,
@@ -761,6 +1017,9 @@ class GestureValidator:
             abstain_rate=abstain_rate,
             latency_ms=latency_ms,
             cv_folds_used=folds_used,
+            rest_false_triggers_per_min=round(rest_fpm, 2),
+            spasm_false_triggers_per_min=round(spasm_fpm, 2),
+            stage1_accuracy=round(s1_acc, 4),
         )
 
 
@@ -842,7 +1101,19 @@ class GestureLearningSystem:
             az          = gs.abs_az,
             euler_roll  = getattr(gs, 'euler_roll',  0.0),
             euler_pitch = getattr(gs, 'euler_pitch', 0.0),
+            lin_ax      = getattr(gs, 'lin_ax',      0.0),
+            lin_ay      = getattr(gs, 'lin_ay',      0.0),
+            lin_az      = getattr(gs, 'lin_az',      0.0),
         ))
+
+    def record_labeled(self, label: str, mode: str = "accessible") -> bool:
+        """Carer tap-to-label ('rest' | 'intentional' | 'involuntary' | direction)."""
+        ok = self.recorder.record_labeled_window(
+            label=label, session_id=self._session_id, mode=mode
+        )
+        if ok:
+            self._last_rec_flash = time.monotonic()
+        return ok
 
     # ── Learn mode ────────────────────────────────────────────────────────────
 

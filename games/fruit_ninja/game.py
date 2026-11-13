@@ -29,6 +29,8 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 import pygame
 from shared.gameplay_config import FRUIT_NINJA_ACCESSIBLE as _ACC, FRUIT_NINJA_STANDARD as _STD, INACTIVITY_CONFIG as _INACT
 from shared.gesture_hud import GestureHUD
+from shared.gestures import Gesture
+from shared.gestures.bindings import poll_and_signals
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
@@ -601,17 +603,24 @@ class FruitNinjaGame:
 
                 # Update Inactivity
                 gs = self._gesture_src.get_state() if self._gesture_src else None
+                sig = self._gesture_src.signals() if (self._gesture_src and hasattr(self._gesture_src, "signals")) else None
                 is_moving = self._moving or (getattr(self, "_actual_mag", 0.0) > 0.5)
                 if gs is not None and gs.calibrated and not getattr(gs, "sensor_disconnected", False):
-                    gyro_mag = math.hypot(gs.abs_gz, gs.abs_gy)
-                    visible_thresh = 8.0  # GYRO_VISIBLE_ACC
-                    is_moving = (
-                        is_moving
-                        or (gyro_mag >= visible_thresh)
-                        or gs.launch
-                        or abs(gs.paddle_velocity) > 0.08
-                        or abs(gs.tilt_y) > 0.08
-                    )
+                    if sig is not None:
+                        gyro_mag = math.hypot(sig.gz, sig.gy)
+                        is_moving = (
+                            is_moving
+                            or (gyro_mag >= 8.0)
+                            or gs.launch
+                            or abs(sig.tilt_x) > 0.08
+                            or abs(sig.tilt_y) > 0.08
+                        )
+                    else:
+                        is_moving = (
+                            is_moving
+                            or gs.launch
+                            or abs(gs.tilt_y) > 0.08
+                        )
 
                 sensor_not_ready = (
                     gs is not None
@@ -813,56 +822,67 @@ class FruitNinjaGame:
             # Store combo count for HUD display
             self._last_combo = getattr(gs, 'combo_count', 0)
 
-            # Sensor mode: integrate raw gyro values
-            # abs_gz (yaw)   → horizontal
-            # abs_gy (pitch) → vertical (positive gy = wrist pitches up = cursor up)
-            gz = gs.abs_gz
-            gy = gs.abs_gy
+            events, sig = poll_and_signals(self._gesture_src, gs)
+            event_hit = any(
+                e.gesture in (
+                    Gesture.SLICE,
+                    Gesture.FLICK_LEFT,
+                    Gesture.FLICK_RIGHT,
+                    Gesture.FLICK_UP,
+                    Gesture.FLICK_DOWN,
+                    Gesture.HOLD_LEFT,
+                    Gesture.HOLD_RIGHT,
+                    Gesture.HOLD_UP,
+                    Gesture.HOLD_DOWN,
+                    Gesture.ANY_MOVE,
+                    Gesture.DWELL,
+                )
+                for e in events
+            )
 
-            # Astra uses a smaller dead-zone so tiny movements still register
-            dead = GYRO_DEAD_ACC if self._mode == "accessible" else GYRO_DEAD
-            
-            # Low-pass filter for Accessible mode tremors
+            gz = sig.gz
+            gy = sig.gy
+
+            dead = (GYRO_DEAD_ACC if self._mode == "accessible" else GYRO_DEAD) * 0.75
             if self._mode == "accessible":
                 self._acc_gz_history.append(gz)
                 self._acc_gy_history.append(gy)
                 gz = sum(self._acc_gz_history) / len(self._acc_gz_history)
                 gy = sum(self._acc_gy_history) / len(self._acc_gy_history)
-                
+
             if abs(gz) < dead:
                 gz = 0.0
             if abs(gy) < dead:
                 gy = 0.0
 
-            # Astra uses higher scale — small motion → noticeable cursor movement
             px_x = self._gyro_px_x_acc if self._mode == "accessible" else self._gyro_px_x
             px_y = self._gyro_px_y_acc if self._mode == "accessible" else self._gyro_px_y
 
-            # Test mode: ML model predicts direction; normal: raw gyro integration
+            # Test mode: ML model predicts direction; normal: responsive gyro integration
             old_blade_x, old_blade_y = self._blade_x, self._blade_y
-            
+
             if self._game_submode == "test" and self._learner is not None:
                 tdx, tdy = self._learner.get_cursor_delta(gs, px_x, px_y, dt)
                 self._blade_x += tdx
                 self._blade_y += tdy
             else:
-                self._blade_x += -gz * px_x * dt   # invert: yaw left → cursor left
-                self._blade_y += gy  * px_y * dt   # invert: raise hand → cursor up
+                self._blade_x += -gz * (px_x * 1.25) * dt
+                self._blade_y += gy * (px_y * 1.25) * dt
 
             actual_dx = self._blade_x - old_blade_x
             actual_dy = self._blade_y - old_blade_y
             actual_mag = math.hypot(actual_dx, actual_dy)
-            
+
             self._actual_dx = actual_dx
             self._actual_dy = actual_dy
             self._actual_mag = actual_mag
 
-            gyro_mag       = math.hypot(gz, gy)
+            gyro_mag = math.hypot(gz, gy)
             visible_thresh = GYRO_VISIBLE_ACC if self._mode == "accessible" else GYRO_VISIBLE
-            slice_thresh   = GYRO_SLICE_ACC   if self._mode == "accessible" else GYRO_SLICE
+            slice_thresh = GYRO_SLICE_ACC if self._mode == "accessible" else GYRO_SLICE
 
-            self._moving = (gyro_mag >= slice_thresh) or gs.launch
-            if gyro_mag >= visible_thresh or gs.launch:
+            self._moving = (gyro_mag >= slice_thresh) or event_hit or gs.launch
+            if gyro_mag >= visible_thresh or event_hit or gs.launch:
                 self._last_move_ms = now_ms
 
             # Astra auto-aim: when moving, pull blade toward nearest fruit
@@ -1343,11 +1363,18 @@ class FruitNinjaGame:
             f"moving: {self._moving}",
         ]
         if gs:
-            lines += [
-                f"abs_gz (yaw H):  {gs.abs_gz:+.1f} °/s",
-                f"abs_gy (pitch V):{gs.abs_gy:+.1f} °/s",
-                f"launch: {gs.launch}",
-            ]
+            sig = self._gesture_src.signals() if (self._gesture_src and hasattr(self._gesture_src, "signals")) else None
+            if sig is not None:
+                lines += [
+                    f"pointer: ({sig.pointer_x:.2f}, {sig.pointer_y:.2f})",
+                    f"tilt:    ({sig.tilt_x:+.2f}, {sig.tilt_y:+.2f})",
+                    f"launch:  {gs.launch}",
+                ]
+            else:
+                lines += [
+                    f"tilt_y:  {gs.tilt_y:+.2f}",
+                    f"launch:  {gs.launch}",
+                ]
         row = max(10, int(16 * sc))
         y0  = self._H - max(60, int(100 * sc))
         for i, line in enumerate(lines):

@@ -28,6 +28,8 @@ from typing import Optional, Tuple, TYPE_CHECKING
 
 import pygame
 from shared.gesture_hud import GestureHUD
+from shared.gestures.bindings import poll_and_signals
+from shared.gestures.types import Gesture
 from shared.game_experience import GameGoalsPrompt, GameExitAppreciationScreen, FireworksCelebration
 from shared.learn_test_support import (
     GuidedLearnFlow,
@@ -298,11 +300,23 @@ class SnakeGame:
         if new_dir != self._direction.opposite():
             self._next_dir = new_dir
 
+    BINDINGS = {
+        Gesture.FLICK_LEFT:  Dir.LEFT,
+        Gesture.HOLD_LEFT:   Dir.LEFT,
+        Gesture.FLICK_RIGHT: Dir.RIGHT,
+        Gesture.HOLD_RIGHT:  Dir.RIGHT,
+        Gesture.FLICK_UP:    Dir.UP,
+        Gesture.HOLD_UP:     Dir.UP,
+        Gesture.FLICK_DOWN:  Dir.DOWN,
+        Gesture.HOLD_DOWN:   Dir.DOWN,
+    }
+
     def _read_gesture(self, gs, dt: float) -> None:
-        """Map GestureState tilt to a direction change (edge-triggered)."""
+        """Map GestureEvents (BINDINGS) and Signals tilt to a direction change."""
         if gs is None:
             return
-        if not gs.calibrated:
+        events, sig = poll_and_signals(self._gesture_src, gs)
+        if not sig.calibrated:
             return
 
         if self._game_submode == "test" and self._learner is not None:
@@ -316,16 +330,23 @@ class SnakeGame:
                 self._read_gesture_standard(tilt_x, tilt_y)
             return
 
+        # Discrete BINDINGS (flick-to-steer / accessible hold)
+        for ev in events:
+            bound_dir = self.BINDINGS.get(ev.gesture)
+            if bound_dir is not None:
+                self._apply_direction(bound_dir)
+                return
+
         tilt_x = 0
-        if gs.paddle_velocity < -TILT_THRESH:
+        if sig.tilt_x < -TILT_THRESH:
             tilt_x = -1
-        elif gs.paddle_velocity > TILT_THRESH:
+        elif sig.tilt_x > TILT_THRESH:
             tilt_x = 1
 
         tilt_y = 0
-        if gs.tilt_y < -TILT_THRESH:
+        if sig.tilt_y < -TILT_THRESH:
             tilt_y = -1   # forward tilt → UP
-        elif gs.tilt_y > TILT_THRESH:
+        elif sig.tilt_y > TILT_THRESH:
             tilt_y = 1    # back tilt → DOWN
 
         if self._mode == "accessible":
@@ -450,7 +471,7 @@ class SnakeGame:
         elif keys[pygame.K_RIGHT]:
             self._apply_direction(Dir.RIGHT)
 
-        # Feed left/right to KeyboardFallback so paddle_velocity is set
+        # Feed left/right to KeyboardFallback so tilt_x is set
         src = self._gesture_src
         if hasattr(src, "press_left"):
             if keys[pygame.K_LEFT]:
@@ -847,10 +868,11 @@ class SnakeGame:
             return
         gs = self._gesture_src.get_state()
         draw_gesture_debug_overlay(self._screen, gs, self._W, self._H, self._fsc, self._font_lg)
+        _, sig = poll_and_signals(self._gesture_src, gs)
         lines = [
-            f"paddle_vel : {gs.paddle_velocity:+.3f}",
-            f"tilt_y     : {gs.tilt_y:+.3f}",
-            f"calibrated : {gs.calibrated}",
+            f"tilt_x     : {sig.tilt_x:+.3f}",
+            f"tilt_y     : {sig.tilt_y:+.3f}",
+            f"calibrated : {sig.calibrated}",
             f"direction  : {self._direction.name}",
             f"next_dir   : {self._next_dir.name}",
         ]

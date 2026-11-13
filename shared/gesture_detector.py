@@ -55,7 +55,7 @@ class SliceDetector:
         self._window: deque = deque(maxlen=WINDOW_SIZE)
 
         # Cooldown tracking
-        self._last_slice_time: float = 0.0
+        self._last_slice_time: float = -1e9
 
         # Combo tracking: deque of slice timestamps within combo window
         self._slice_history: deque = deque()
@@ -133,8 +133,10 @@ class SliceDetector:
           gz < 0  → leftward
 
         gy controls pitch (vertical):
-          gy > 0  → upward wrist pitch (palm facing you)
-          gy < 0  → downward (palm away)
+          gy < 0  → "up"   (same sign convention as flick-to-steer and
+                             FLICK_UP_GY_SIGN in shared/gestures/detectors.py)
+          gy > 0  → "down"
+          Verify on hardware with a replay recording (tests/replay.py).
 
         gx controls roll (twist) — less relevant for slicing direction.
 
@@ -166,7 +168,10 @@ class SliceDetector:
 
         Prunes entries older than COMBO_WINDOW_SECS before returning count.
         """
-        now = time.monotonic()
+        return self.combo_count_at(time.monotonic())
+
+    def combo_count_at(self, now: float) -> int:
+        """combo_count evaluated at an explicit time (deterministic for replay)."""
         cutoff = now - COMBO_WINDOW_SECS
 
         # Prune old entries

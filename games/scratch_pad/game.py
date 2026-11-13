@@ -20,6 +20,8 @@ from shared.learn_test_support import (
     draw_validation_panel,
 )
 from shared.gesture_hud import GestureHUD
+from shared.gestures import Gesture
+from shared.gestures.bindings import dispatch_bindings, poll_and_signals
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 W, H = 800, 600
@@ -142,16 +144,11 @@ class ScratchPadGame:
                     self._predicted_gesture = f"{direction.upper()} ({conf*100:.0f}%)"
                     self._prediction_timer = 2.0  # display for 2 seconds
 
-            # Map Euler angles directly to screen position for drawing
-            max_angle = 30.0
-            roll = max(-max_angle, min(max_angle, gs.euler_roll))
-            pitch = max(-max_angle, min(max_angle, gs.euler_pitch))
+            events, sig = poll_and_signals(self._gesture_src, gs)
+            self._cursor_x = self._W * sig.pointer_x
+            self._cursor_y = self._H * sig.pointer_y
 
-            self._cursor_x = self._W * (roll + max_angle) / (2 * max_angle)
-            self._cursor_y = self._H * (pitch + max_angle) / (2 * max_angle)
-
-            # Check for flick to toggle pen
-            if gs.launch:
+            def _toggle_pen(_ev=None):
                 self._pen_down = not self._pen_down
                 if self._pen_down:
                     self._current_color = random.choice(PALETTE)
@@ -159,6 +156,17 @@ class ScratchPadGame:
                     if self._audio: self._audio.play_flick_cast()
                 else:
                     if self._audio: self._audio.play_collect()
+
+            matched = dispatch_bindings(
+                events,
+                {
+                    Gesture.FLICK_UP: _toggle_pen,
+                    Gesture.FLICK_DOWN: _toggle_pen,
+                    Gesture.SHAKE: _toggle_pen,
+                },
+            )
+            if not matched and gs.launch:
+                _toggle_pen()
 
             # Add points to active line
             if self._pen_down:

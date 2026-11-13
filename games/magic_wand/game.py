@@ -10,6 +10,8 @@ import random
 import pygame
 from shared.learn_test_support import draw_gesture_debug_overlay
 from shared.gesture_hud import GestureHUD
+from shared.gestures import Gesture
+from shared.gestures.bindings import dispatch_bindings, poll_and_signals
 from typing import List, Optional, Tuple
 
 import pygame
@@ -145,23 +147,33 @@ class MagicWandGame:
 
         gs = self._gesture_src.get_state() if self._gesture_src else None
         if gs and gs.calibrated:
-            # Map Euler angles directly to screen position for pointing
-            max_angle = 30.0
-            roll = max(-max_angle, min(max_angle, gs.euler_roll))
-            pitch = max(-max_angle, min(max_angle, gs.euler_pitch))
-
-            self._wand_x = self._W * (roll + max_angle) / (2 * max_angle)
-            self._wand_y = self._H * (pitch + max_angle) / (2 * max_angle)
+            events, sig = poll_and_signals(self._gesture_src, gs)
+            self._wand_x = self._W * sig.pointer_x
+            self._wand_y = self._H * sig.pointer_y
 
             state = STATES[self._state_idx]
             if state == "FLICK":
-                if gs.launch:
+                def _on_flick(_ev=None):
                     self._spawn_particles(self._wand_x, self._wand_y, 50)
                     if self._audio:
                         self._audio.play_flick_cast()
                     self._spawn_floating_text(self._wand_x, self._wand_y)
                     self._reaction_timer = 0.3
                     self._set_state(self._state_idx + 1)
+
+                matched = dispatch_bindings(
+                    events,
+                    {
+                        Gesture.FLICK_UP: _on_flick,
+                        Gesture.FLICK_LEFT: _on_flick,
+                        Gesture.FLICK_RIGHT: _on_flick,
+                        Gesture.FLICK_DOWN: _on_flick,
+                        Gesture.SLICE: _on_flick,
+                        Gesture.SHAKE: _on_flick,
+                    },
+                )
+                if not matched and gs.launch:
+                    _on_flick()
             elif self._target_pos:
                 dist = math.hypot(self._wand_x - self._target_pos[0], self._wand_y - self._target_pos[1])
                 if dist < int(40 * self._sc):

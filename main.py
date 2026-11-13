@@ -100,6 +100,14 @@ def parse_args() -> argparse.Namespace:
         "--engine", choices=["rf", "dtw"], default="rf",
         help="Default gesture engine to use (rf: Random Forest (v1), dtw: Dynamic Time Warping (v2))"
     )
+    p.add_argument(
+        "--record", metavar="PATH", default=None,
+        help="Record raw IMUSamples to a .jsonl file for offline replay testing"
+    )
+    p.add_argument(
+        "--sf-profile", choices=["full", "lean"], default="full",
+        help="Sensor fusion BLE stream profile: full (quat+acc+gyro) or lean (quat+gyro)"
+    )
     return p.parse_args()
 
 
@@ -202,7 +210,7 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
     _print_splash(label)
     _print_controls()
 
-    sensor = MetaMotionSensor(scan_timeout=12)
+    sensor = MetaMotionSensor(scan_timeout=12, sf_profile=getattr(args, "sf_profile", "full"))
     print("[main] Starting sensor…  (make sure Bluetooth is on)")
     try:
         sensor.start_background(address=args.address)
@@ -250,6 +258,12 @@ def main() -> None:
     # ── Determine mode and build gesture source ───────────────────────────
     mode = _resolve_mode(args)
     gesture_src, sensor = _build_gesture_source(args, mode)
+    recorder = None
+    if args.record and sensor is not None:
+        from shared.recorder import SampleRecorder
+        recorder = SampleRecorder(args.record)
+        sensor.set_sample_callback(recorder)
+        print(f"[main] Recording IMUSamples to {args.record}")
 
     # ── Audio ──────────────────────────────────────────────────────────────
     from shared.audio import make_audio_manager
@@ -265,6 +279,11 @@ def main() -> None:
         pygame.quit()
         return
     username = username_result
+    from shared.child_profile import ChildProfile
+    if hasattr(gesture_src, "apply_profile"):
+        prof = ChildProfile.load(username)
+        if prof.calibrated_profile:
+            gesture_src.apply_profile(prof)
 
     # ── Main selection loop ────────────────────────────────────────────────
     from home import HomeScreen
@@ -339,6 +358,8 @@ def main() -> None:
         print("\n[main] Interrupted.")
     finally:
         print("[main] Shutting down…")
+        if recorder is not None:
+            recorder.close()
         gesture_src.stop()
         if sensor is not None:
             sensor.stop_background()

@@ -28,7 +28,8 @@ from typing import List, Optional, Tuple
 
 import pygame
 from shared.gesture_hud import GestureHUD
-from shared.gesture_detector import SliceDetector
+from shared.gestures import Gesture
+from shared.gestures.bindings import dispatch_bindings, poll_and_signals
 from shared.game_experience import (
     GameGoalsPrompt, InactivityMonitor, VisualEffects,
     NebulaBg, StarField, make_glow, FireworksCelebration,
@@ -147,7 +148,6 @@ class VillainSlicerGame:
         self._blade_x = self._W // 2
         self._blade_y = self._H // 2
         self._blade_trail: deque = deque(maxlen=16)
-        self._slice_detector = SliceDetector()
         
         # Game State
         self._score = 0
@@ -273,9 +273,21 @@ class VillainSlicerGame:
                 
         # Update Blade Position from Sensor / Mouse
         gs = self._gesture_src.get_state() if self._gesture_src else None
-        self._update_blade(gs, dt)
-        
-        # Check Ultimate Trigger via Upward Wrist Flick
+        events, sig = poll_and_signals(self._gesture_src, gs)
+        self._update_blade(gs, dt, sig)
+
+        # Check Ultimate Trigger via Upward Wrist Flick / Shake
+        def _maybe_ult(_ev):
+            if self._energy >= 100.0 and not self._ultimate_active:
+                self._trigger_ultimate()
+
+        dispatch_bindings(
+            events,
+            {
+                Gesture.FLICK_UP: _maybe_ult,
+                Gesture.SHAKE: _maybe_ult,
+            },
+        )
         if gs and gs.launch and self._energy >= 100.0 and not self._ultimate_active:
             self._trigger_ultimate()
             
@@ -299,12 +311,17 @@ class VillainSlicerGame:
             p.life -= dt
         self._popups = [p for p in self._popups if p.life > 0]
 
-    def _update_blade(self, gs, dt: float):
-        if gs and gs.calibrated and (abs(gs.abs_gz) > 10 or abs(gs.abs_gy) > 10):
-            # Gyroscope integration
-            sens = 3.2 if self._mode == "accessible" else 2.6
-            dx = -gs.abs_gz * sens * dt * 60.0
-            dy = -gs.abs_gy * sens * dt * 60.0
+    def _update_blade(self, gs, dt: float, sig=None):
+        if (
+            gs is not None
+            and gs.calibrated
+            and sig is not None
+            and not getattr(gs, "sensor_disconnected", False)
+            and (abs(sig.gz) > 7 or abs(sig.gy) > 7)
+        ):
+            sens = 4.0 if self._mode == "accessible" else 3.3
+            dx = -sig.gz * sens * dt * 60.0
+            dy = -sig.gy * sens * dt * 60.0
             self._blade_x = max(20, min(self._W - 20, self._blade_x + dx))
             self._blade_y = max(20, min(self._H - 20, self._blade_y + dy))
         else:

@@ -19,6 +19,8 @@ import pygame
 from shared.gesture_hud import GestureHUD
 from shared.learn_test_support import draw_gesture_debug_overlay
 from shared.game_experience import NebulaBg
+from shared.gestures.bindings import GAME_GESTURE_LEGENDS, poll_and_signals
+from shared.gestures.types import Gesture
 
 
 # ── Dimensions ────────────────────────────────────────────────────────────────
@@ -274,9 +276,12 @@ class HomeScreen:
             elif event.key == pygame.K_f:
                 self._toggle_fullscreen()
             elif event.key == pygame.K_c:
-                # Trigger PCA Functional Calibration
-                if hasattr(self._gesture_src, "start_functional_calibration"):
-                    self._gesture_src.start_functional_calibration()
+                if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                    if hasattr(self._gesture_src, "start_functional_calibration"):
+                        self._gesture_src.start_functional_calibration()
+                else:
+                    from shared.calibration_wizard import CalibrationWizard
+                    CalibrationWizard(self._screen, self._clock, self._username).run(self._gesture_src)
             elif event.key == pygame.K_ESCAPE:
                 return "quit"
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -316,20 +321,41 @@ class HomeScreen:
                 self._selected_idx = global_idx
                 break
 
+    BINDINGS = {
+        Gesture.FLICK_UP:   "select",
+        Gesture.HOLD_UP:    "select",
+        Gesture.DWELL:      "select",
+        Gesture.HOLD_LEFT:  "prev",
+        Gesture.FLICK_LEFT: "prev",
+        Gesture.HOLD_RIGHT: "next",
+        Gesture.FLICK_RIGHT:"next",
+    }
+
     def _handle_gesture(self, gesture_src, dt: float) -> Optional[str]:
         if gesture_src is None:
             return None
         gs = gesture_src.get_state()
-        if not gs.calibrated:
+        events, sig = poll_and_signals(gesture_src, gs)
+        if not sig.calibrated:
             return None
 
-        if gs.launch:
-            return self._games[self._selected_idx]
+        for ev in events:
+            action = self.BINDINGS.get(ev.gesture)
+            if action == "select":
+                return self._games[self._selected_idx]
+            elif action == "prev" and self._nav_cd <= 0:
+                self._navigate(-1)
+                self._nav_cd = ACC_NAV_CD if self.mode == "accessible" else TILT_NAV_CD
+                return None
+            elif action == "next" and self._nav_cd <= 0:
+                self._navigate(1)
+                self._nav_cd = ACC_NAV_CD if self.mode == "accessible" else TILT_NAV_CD
+                return None
 
         direction = 0
-        if gs.paddle_velocity < -TILT_THRESHOLD:
+        if sig.tilt_x < -TILT_THRESHOLD:
             direction = -1
-        elif gs.paddle_velocity > TILT_THRESHOLD:
+        elif sig.tilt_x > TILT_THRESHOLD:
             direction = 1
 
         if self.mode == "accessible":
@@ -865,16 +891,18 @@ class HomeScreen:
 
     def _draw_hint(self) -> None:
         sc = self._sc
+        cur_game = self._games[self._selected_idx] if self._games else ""
+        legend = GAME_GESTURE_LEGENDS.get(cur_game, "Gestures: Tilt to choose • Flick/Hold Up to play")
         controls = [
-            ("Sensor", "tilt to choose • flick to play"),
+            ("Active", legend),
+            ("Sensor", "tilt/hold to choose • flick/hold up to play • C = 5-step calibration"),
             ("Mouse",  "hover to choose • click to play  •  click Player to switch"),
             ("Keys",   "← → to choose • Enter to play • U = switch user • F = fullscreen"),
-            ("In-game", "L = Learn  •  T = Test  •  R = Regular mode"),
         ]
         y = self._card_y + self._card_h + max(18, int(30 * sc))
         for label, text in controls:
             line = f"{label}: {text}"
-            clr  = (100, 180, 100) if label == "In-game" else DIM_CLR
+            clr  = (110, 210, 255) if label == "Active" else DIM_CLR
             surf = self._font_sub.render(line, True, clr)
             self._screen.blit(surf, surf.get_rect(center=(self._W // 2, y)))
             y += max(12, int(17 * sc))

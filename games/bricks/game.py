@@ -14,7 +14,7 @@ Controls
 Design decisions
 ────────────────
 - Resolution independent: internal render size 800×600, scaled to window.
-- Paddle speed is proportional to GestureState.paddle_velocity [-1 … 1].
+- Paddle speed is proportional to Signals.tilt_x [-1 … 1].
 - Ball spin (GestureState.spin) adds a lateral velocity nudge on each
   paddle bounce, letting skilled players aim with wrist rotation.
 - Bricks have 1–3 hit points mapped to visible colour.
@@ -30,6 +30,8 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import pygame
 from shared.gesture_hud import GestureHUD
+from shared.gestures.bindings import poll_and_signals
+from shared.gestures.types import Gesture
 from shared.learn_test_support import (
     GuidedLearnFlow,
     build_validation_lines,
@@ -552,6 +554,8 @@ class BricksGame:
         # Smoothly resize
         self._paddle.width += int((target_w - self._paddle.width) * 0.15)
 
+        events, sig = poll_and_signals(self._gesture_source, gs)
+
         # Mouse control: if the cursor moved this frame, follow it directly
         mx = pygame.mouse.get_pos()[0]
         if mx != self._prev_mouse_x:
@@ -562,9 +566,9 @@ class BricksGame:
                 direction, confidence = self._learner.predict(gs)
                 self._update_paddle_intent_ml(dt, gs, direction, confidence)
             else:
-                self._update_paddle_intent(dt, gs)
+                self._update_paddle_intent(dt, sig, events)
         else:
-            velocity = gs.paddle_velocity if gs else 0.0
+            velocity = sig.tilt_x
             if self._game_submode == "test" and self._learner is not None and gs is not None:
                 tdx, _tdy = self._learner.get_cursor_delta(gs, self._W * 0.25, self._H * 0.25, dt)
                 denom = max(self._paddle_spd * dt, 1e-6)
@@ -580,8 +584,8 @@ class BricksGame:
 
         self._log_tick += 1
 
-        # Launch gesture
-        if gs and gs.launch:
+        # Launch gesture via BINDINGS (FLICK_UP, HOLD_UP, DWELL, ANY_MOVE)
+        if any(e.gesture in self.BINDINGS for e in events):
             self._launch_all_inactive()
 
     # ── Accessible intent-assist helpers ──────────────────────────────────────
@@ -626,14 +630,19 @@ class BricksGame:
             elif direction == "right":
                 self._paddle.x += int(self._paddle_spd * dt)
 
-    def _update_paddle_intent(self, dt: float, gs) -> None:
+    BINDINGS = {
+        Gesture.FLICK_UP: "launch",
+        Gesture.HOLD_UP:  "launch",
+        Gesture.DWELL:    "launch",
+        Gesture.ANY_MOVE: "launch",
+    }
+
+    def _update_paddle_intent(self, dt: float, sig, events) -> None:
         """Accessible: drift randomly when ball rises; aim at random paddle spot when falling."""
-        if gs is None:
-            return
         has_gesture = (
-            abs(gs.paddle_velocity) > ACCESSIBLE_INTENT_THRESH
-            or abs(gs.tilt_y) > ACCESSIBLE_INTENT_THRESH
-            or gs.launch
+            abs(sig.tilt_x) > ACCESSIBLE_INTENT_THRESH
+            or abs(sig.tilt_y) > ACCESSIBLE_INTENT_THRESH
+            or bool(events)
         )
         if not has_gesture:
             return
@@ -937,12 +946,13 @@ class BricksGame:
         if gs is None:
             return
         draw_gesture_debug_overlay(self._screen, gs, self._W, self._H, self._scale, self._font_lg)
+        _, sig = poll_and_signals(self._gesture_source, gs)
         lines = [
             f"ax (smooth) : {gs.raw_ax:+.3f} g",
             f"gz (smooth) : {gs.raw_gz:+.3f} °/s",
-            f"paddle vel  : {gs.paddle_velocity:+.3f}",
+            f"tilt_x      : {sig.tilt_x:+.3f}",
             f"spin        : {gs.spin:+.3f}",
-            f"tilt_y      : {gs.tilt_y:+.3f}",
+            f"tilt_y      : {sig.tilt_y:+.3f}",
             f"launch      : {gs.launch}",
         ]
         sc  = self._scale

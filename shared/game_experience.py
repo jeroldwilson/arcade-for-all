@@ -311,8 +311,7 @@ class VisualEffects:
             self.particles.append(Particle(x, y, bright, size=random.uniform(3, 7)))  # type: ignore[arg-type]
 
     def trigger_resume(self) -> None:
-        if self.sensor:
-            self.sensor.vibrate(0.2)
+        pass
 
     def trigger_pause(self) -> None:
         pass
@@ -351,6 +350,9 @@ class InactivityMonitor:
         self._led_blinking        = False
         self._pulse_count         = 0
         self._max_pulses          = 3
+        self._rest_haptic_delay   = 30.0
+        self._rest_haptic_interval = 15.0
+        self._last_rest_haptic_time = 0.0
         self._font: Optional[pygame.font.Font] = None
         self._small_font: Optional[pygame.font.Font] = None
 
@@ -366,6 +368,7 @@ class InactivityMonitor:
         self.is_paused = False
         self.message = ""
         self._pulse_count = 0
+        self._last_rest_haptic_time = 0.0
         self._stop_blinking()
 
     def _ensure_fonts(self) -> None:
@@ -379,11 +382,13 @@ class InactivityMonitor:
             self.last_motion_time = now
             self.message          = ""
             self._pulse_count     = 0
+            self._last_rest_haptic_time = 0.0
             self._stop_blinking()
             return None
         if is_moving:
             self.last_motion_time = now
             self._pulse_count     = 0
+            self._last_rest_haptic_time = 0.0
             self._stop_blinking()
             if self.is_paused:
                 self.is_paused = False
@@ -394,6 +399,11 @@ class InactivityMonitor:
                 self.message = ""
             return None
         inactive_dur = now - self.last_motion_time
+        if inactive_dur >= self._rest_haptic_delay and self.sensor is not None:
+            if (self._last_rest_haptic_time == 0.0
+                    or (now - self._last_rest_haptic_time) >= self._rest_haptic_interval):
+                self._last_rest_haptic_time = now
+                self.sensor.vibrate(0.2)
         if inactive_dur > self.pause_threshold:
             if not self.is_paused:
                 self.is_paused = True
@@ -414,7 +424,6 @@ class InactivityMonitor:
                 self.last_pulse_time = now
                 if self.sensor and self._pulse_count < self._max_pulses:
                     self._pulse_count += 1
-                    self.sensor.vibrate(0.2)
                     self.sensor.set_ambient_light(on=True, color=random.choice([0, 1, 2]), blink=True)
                     self._led_blinking = True
                 elif self._pulse_count >= self._max_pulses and self._led_blinking:

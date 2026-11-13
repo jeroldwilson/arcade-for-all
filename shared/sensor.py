@@ -166,10 +166,21 @@ _MODULE_SENSOR_FUSION  = 0x19
 #   upper nibble = gyro_range_enum+1  (1=±2000dps, 2=±1000dps, 3=±500dps, 4=±250dps)
 # The original 0x0A used wrong packing (acc|gyro<<2) which is why it disconnected.
 # 0x31 = acc=±4G (lower=1), gyro=±500dps (upper=3, enum=2, written as 3=enum+1)
-_CMD_SF_MODE           = bytes([_MODULE_SENSOR_FUSION, 0x02, 0x01, 0x31])  # NDOF, acc±4G, gyro±500dps
-_CMD_SF_OUTPUT_ENABLE  = bytes([_MODULE_SENSOR_FUSION, 0x03, 0x13, 0x00])  # enable CORRECTED_ACC (0x01) | CORRECTED_GYRO (0x02) | EULER (0x10)
+# Mode 0x02 = IMUPlus (6-axis acc+gyro).  NDoF (0x01) adds the magnetometer, which
+# indoor metal / laptops / wheelchairs corrupt — see docs/v1.0-raodmap.md §2.
+_SF_MODE_IMUPLUS       = 0x02
+_CMD_SF_MODE           = bytes([_MODULE_SENSOR_FUSION, 0x02, _SF_MODE_IMUPLUS, 0x31])  # IMUPlus, acc±4G, gyro±500dps
+# OUTPUT_ENABLE mask bits: CORRECTED_ACC=0x01 CORRECTED_GYRO=0x02 CORRECTED_MAG=0x04
+#                          QUATERNION=0x08 EULER=0x10 GRAVITY=0x20 LINEAR_ACC=0x40
+# "full" profile: quaternion + corrected acc + corrected gyro (3 streams, same load as before)
+# "lean" profile: quaternion + corrected gyro (2 streams, ~1/3 less BLE traffic;
+#                 accelerometer is synthesised from the quaternion gravity vector)
+_CMD_SF_OUTPUT_ENABLE      = bytes([_MODULE_SENSOR_FUSION, 0x03, 0x0B, 0x00])  # ACC | GYRO | QUATERNION
+_CMD_SF_OUTPUT_ENABLE_LEAN = bytes([_MODULE_SENSOR_FUSION, 0x03, 0x0A, 0x00])  # GYRO | QUATERNION
 _CMD_SF_OUTPUT_DISABLE = bytes([_MODULE_SENSOR_FUSION, 0x03, 0x00, 0x7f])  # disable all SF outputs
-_CMD_SF_EULER_EN       = bytes([_MODULE_SENSOR_FUSION, 0x08, 0x01])  # subscribe EULER_ANGLES (0x08)
+_CMD_SF_EULER_EN       = bytes([_MODULE_SENSOR_FUSION, 0x08, 0x01])  # subscribe EULER_ANGLES (0x08) — legacy, unused
+_CMD_SF_QUAT_EN        = bytes([_MODULE_SENSOR_FUSION, 0x07, 0x01])  # subscribe QUATERNION (0x07)
+_CMD_SF_QUAT_DIS       = bytes([_MODULE_SENSOR_FUSION, 0x07, 0x00])  # unsubscribe QUATERNION
 _CMD_SF_CAL_EN         = bytes([_MODULE_SENSOR_FUSION, 0x0B, 0x01])  # subscribe CALIBRATION_STATE (0x0B)
 _CMD_SF_START          = bytes([_MODULE_SENSOR_FUSION, 0x01, 0x01])  # start fusion
 _CMD_SF_EULER_DIS      = bytes([_MODULE_SENSOR_FUSION, 0x08, 0x00])  # unsubscribe Euler
@@ -202,11 +213,19 @@ class IMUSample:
     gx: float = 0.0
     gy: float = 0.0
     gz: float = 0.0
-    # Bosch Kalman Filter hardware fusion outputs (module 0x19, NDOF mode)
-    hw_heading: float = 0.0       # compass heading 0-360° (drift-free yaw)
+    # Bosch hardware fusion outputs (module 0x19, IMUPlus mode).
+    # Euler fields are derived from the hardware quaternion (ZYX, same
+    # convention as the Madgwick fallback); heading is relative yaw 0-360°
+    # (6-axis IMUPlus has no compass, so it drifts slowly).
+    hw_heading: float = 0.0       # yaw 0-360°
     hw_pitch: float = 0.0         # pitch -90 to +90°
     hw_roll: float = 0.0          # roll -180 to +180°
     hw_fusion_valid: bool = False  # True once hardware fusion data is arriving
+    # Hardware quaternion (QUATERNION 0x07).  All zero = not available.
+    hw_qw: float = 0.0
+    hw_qx: float = 0.0
+    hw_qy: float = 0.0
+    hw_qz: float = 0.0
 
 
 class MetaMotionSensor:
@@ -230,8 +249,10 @@ class MetaMotionSensor:
         sensor.stop_background()
     """
 
-    def __init__(self, scan_timeout: float = 10.0):
+    def __init__(self, scan_timeout: float = 10.0, sf_profile: str = "full"):
         self.scan_timeout   = scan_timeout
+        # "full" = quaternion + corrected acc + gyro; "lean" = quaternion + gyro
+        self.sf_profile     = sf_profile if sf_profile in ("full", "lean") else "full"
         self.data_queue: queue.Queue[IMUSample] = queue.Queue(maxsize=256)
         self._client: Optional[BleakClient] = None
         self._connected     = False
@@ -264,6 +285,16 @@ class MetaMotionSensor:
         self._address: Optional[str] = None  # stored in connect() for reconnect-after-SF-disconnect
         self._shutdown_event: Optional[asyncio.Event] = None
         self._haptic_disabled: bool = False
+        # Hardware quaternion state
+        self._last_quat: tuple = (0.0, 0.0, 0.0, 0.0)
+        self._quat_notify_count: int = 0
+        # Sample-rate / dt-jitter measurement (roadmap Phase 0)
+        self._rate_last_t: float = 0.0
+        self._rate_n: int = 0
+        self._rate_sum: float = 0.0
+        self._rate_sumsq: float = 0.0
+        self._rate_window_t0: float = 0.0
+        self.rate_stats: dict = {"hz": 0.0, "dt_mean_ms": 0.0, "dt_std_ms": 0.0, "n": 0}
 
     # ── Public sync API (for use from game / main thread) ─────────────────────
 
@@ -569,6 +600,7 @@ class MetaMotionSensor:
         self._acc_notify_count  = 0
         self._gyro_notify_count = 0
         self._sf_notify_count   = 0
+        self._quat_notify_count = 0
 
         # ── 1. Probe SF module ─────────────────────────────────────────────────
         logger.debug("Probing sensor fusion module 0x19…")
@@ -580,7 +612,8 @@ class MetaMotionSensor:
 
         # ── 2a. Sensor Fusion path ─────────────────────────────────────────────
         if sf_available:
-            logger.info("Starting sensor fusion (NDOF — acc±4G gyro±500dps, config=0x31)…")
+            logger.info("Starting sensor fusion (IMUPlus 6-axis — acc±4G gyro±500dps, profile=%s)…",
+                        self.sf_profile)
             # Pre-configure acc + gyro hardware modules BEFORE sending SF MODE.
             # The Bosch SF module picks up these config values when it starts.
             # We send CONFIG only — no subscribe/start so firmware stays quiescent.
@@ -591,15 +624,18 @@ class MetaMotionSensor:
                 await _send(label, payload)
                 await asyncio.sleep(0.12)
 
-            for label, payload, delay in [
-                ("SF_MODE",          _CMD_SF_MODE,          0.35),  # NDOF mode + range config
-                ("SF_CORR_ACC_EN",   _CMD_SF_CORR_ACC_EN,   0.15),  # subscribe corrected acc  (0x04)
-                ("SF_CORR_GYRO_EN",  _CMD_SF_CORR_GYRO_EN,  0.15),  # subscribe corrected gyro (0x05)
-                ("SF_EULER_EN",      _CMD_SF_EULER_EN,      0.15),  # subscribe euler angles   (0x08)
-                ("SF_CAL_EN",        _CMD_SF_CAL_EN,        0.15),  # subscribe cal state      (0x0B)
-                ("SF_OUTPUT_ENABLE", _CMD_SF_OUTPUT_ENABLE, 0.15),  # enable SF output mask    (0x03)
-                ("SF_START",         _CMD_SF_START,         0.50),  # start fusion             (0x01)
-            ]:
+            out_en = _CMD_SF_OUTPUT_ENABLE_LEAN if self.sf_profile == "lean" else _CMD_SF_OUTPUT_ENABLE
+            sf_steps = [("SF_MODE", _CMD_SF_MODE, 0.35)]
+            if self.sf_profile == "full":
+                sf_steps.append(("SF_CORR_ACC_EN", _CMD_SF_CORR_ACC_EN, 0.15))
+            sf_steps += [
+                ("SF_CORR_GYRO_EN",  _CMD_SF_CORR_GYRO_EN, 0.15),  # subscribe corrected gyro (0x05)
+                ("SF_QUAT_EN",       _CMD_SF_QUAT_EN,      0.15),  # subscribe quaternion     (0x07)
+                ("SF_CAL_EN",        _CMD_SF_CAL_EN,       0.15),  # subscribe cal state      (0x0B)
+                ("SF_OUTPUT_ENABLE", out_en,               0.15),  # enable SF output mask    (0x03)
+                ("SF_START",         _CMD_SF_START,        0.50),  # start fusion             (0x01)
+            ]
+            for label, payload, delay in sf_steps:
                 ok = await _send(label, payload)
                 await asyncio.sleep(delay)
                 if not ok and label == "SF_MODE":
@@ -630,14 +666,16 @@ class MetaMotionSensor:
             logger.debug("SF streaming started — waiting for corrected acc data…")
             for _ in range(20):        # up to 4 s
                 await asyncio.sleep(0.2)
-                if self._acc_notify_count > 0 or self._sf_notify_count > 0:
-                    logger.info("SF data flowing — acc=%d euler=%d cal=%d",
-                                self._acc_notify_count, self._sf_notify_count, self._mag_cal_state)
+                if self._acc_notify_count > 0 or self._quat_notify_count > 0 or self._sf_notify_count > 0:
+                    logger.info("SF data flowing — acc=%d quat=%d euler=%d cal=%d",
+                                self._acc_notify_count, self._quat_notify_count,
+                                self._sf_notify_count, self._mag_cal_state)
                     return
-            logger.warning("No SF data after 4s (acc=%d) — falling back to raw", self._acc_notify_count)
+            logger.warning("No SF data after 4s (acc=%d quat=%d) — falling back to raw",
+                           self._acc_notify_count, self._quat_notify_count)
             # Clean up failed SF attempt
             for p in [_CMD_SF_OUTPUT_DISABLE, _CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
-                      _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP]:
+                      _CMD_SF_QUAT_DIS, _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP]:
                 try: await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, p, response=False)
                 except Exception: pass
             self._using_sf = False
@@ -698,7 +736,7 @@ class MetaMotionSensor:
         # 2. Stop both SF and raw sensor streams
         for payload in [
             _CMD_SF_OUTPUT_DISABLE, _CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
-            _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP,
+            _CMD_SF_QUAT_DIS, _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP,
             _CMD_ACC_STOP, _CMD_ACC_UNSUB, _CMD_ACC_DATA_UNSUB,
             _CMD_GYRO_STOP, _CMD_GYRO_UNSUB, _CMD_GYRO_DATA_UNSUB, _CMD_GYRO_DATA_UNSUB_270,
             _CMD_LED_STOP,
@@ -832,6 +870,9 @@ class MetaMotionSensor:
         elif module == _MODULE_SENSOR_FUSION and reg == 0x05:   # CORRECTED_GYRO
             self._gyro_notify_count += 1
             self._parse_sf_corrected_gyro(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x07:   # QUATERNION
+            self._quat_notify_count += 1
+            self._parse_sf_quat(data[2:])
         elif module == _MODULE_SENSOR_FUSION and reg == 0x08:   # EULER_ANGLES
             self._sf_notify_count += 1
             self._parse_sf_euler(data[2:])
@@ -889,6 +930,36 @@ class MetaMotionSensor:
         if self._acc_notify_count == 0:
             self._emit_sample()
 
+    def _parse_sf_quat(self, payload: bytearray) -> None:
+        """Parse MblMwQuaternion: 4×float32 [w, x, y, z] from Bosch sensor fusion."""
+        if len(payload) < 16:
+            return
+        w, x, y, z = struct.unpack_from('<ffff', payload[:16])
+        norm = math.sqrt(w*w + x*x + y*y + z*z)
+        if norm < 1e-6:
+            return
+        w, x, y, z = w / norm, x / norm, y / norm, z / norm
+        self._last_quat = (w, x, y, z)
+        self._hw_fusion_valid = True
+        # Derive Euler angles (ZYX, same convention as MadgwickFilter.get_euler_deg)
+        roll = math.degrees(math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)))
+        sp = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+        pitch = math.degrees(math.asin(sp))
+        yaw = math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+        heading = yaw % 360.0
+        self._last_euler = (heading, pitch, roll, yaw)
+        if self._acc_notify_count == 0:
+            # Lean profile: synthesise gravity vector from the quaternion
+            self._last_acc = (
+                2.0 * (x * z - w * y),
+                2.0 * (w * x + y * z),
+                1.0 - 2.0 * (x * x + y * y),
+            )
+            self._emit_sample()
+        if self._quat_notify_count <= 5 or self._quat_notify_count % 500 == 0:
+            logger.debug("SF quat #%d  q=(%+.3f,%+.3f,%+.3f,%+.3f)  roll=%.1f° pitch=%.1f°",
+                         self._quat_notify_count, w, x, y, z, roll, pitch)
+
     def _parse_sf_euler(self, payload: bytearray) -> None:
         """Parse MblMwEulerAngles: 4×float32 [heading, pitch, roll, yaw] from Bosch KF."""
         if len(payload) < 12:
@@ -928,19 +999,23 @@ class MetaMotionSensor:
         logger.debug("Cal data received (%d bytes)", len(payload))
 
     def _emit_sample(self) -> None:
+        now = time.monotonic()
         ax, ay, az = self._last_acc
         gx, gy, gz = self._last_gyro
         hw_heading, hw_pitch, hw_roll, _ = self._last_euler
+        hw_qw, hw_qx, hw_qy, hw_qz = self._last_quat
         sample = IMUSample(
-            timestamp=time.monotonic(),
+            timestamp=now,
             ax=ax, ay=ay, az=az,
             gx=gx, gy=gy, gz=gz,
             hw_heading=hw_heading,
             hw_pitch=hw_pitch,
             hw_roll=hw_roll,
             hw_fusion_valid=self._hw_fusion_valid,
+            hw_qw=hw_qw, hw_qx=hw_qx, hw_qy=hw_qy, hw_qz=hw_qz,
         )
         self._sample_count += 1
+        self._update_rate_stats(now)
         if self._sample_count % 50 == 1:
             logger.debug("sample #%d  acc=(%+.3f,%+.3f,%+.3f)g  gyro=(%+.1f,%+.1f,%+.1f)°/s",
                          self._sample_count, ax, ay, az, gx, gy, gz)
@@ -960,6 +1035,40 @@ class MetaMotionSensor:
                 self._on_sample_cb(sample)
             except Exception:
                 pass
+
+    def _update_rate_stats(self, now: float) -> None:
+        """Measure actual sample rate and arrival-interval jitter (roadmap Phase 0)."""
+        if self._rate_last_t <= 0.0:
+            self._rate_last_t = now
+            self._rate_window_t0 = now
+            return
+        dt = now - self._rate_last_t
+        self._rate_last_t = now
+        self._rate_n += 1
+        self._rate_sum += dt
+        self._rate_sumsq += dt * dt
+        span = now - self._rate_window_t0
+        if span >= 5.0 and self._rate_n >= 10:
+            n = self._rate_n
+            mean = self._rate_sum / n
+            var = max(0.0, self._rate_sumsq / n - mean * mean)
+            std = math.sqrt(var)
+            hz = n / span
+            first = self.rate_stats["n"] == 0
+            self.rate_stats = {
+                "hz": round(hz, 2),
+                "dt_mean_ms": round(mean * 1000.0, 2),
+                "dt_std_ms": round(std * 1000.0, 2),
+                "n": self.rate_stats["n"] + n,
+            }
+            log_fn = logger.info if first else logger.debug
+            log_fn("IMU stream rate: %.1f Hz  dt=%.2f±%.2f ms  (mode=%s)",
+                   hz, mean * 1000.0, std * 1000.0,
+                   f"SF/{self.sf_profile}" if self._using_sf else "raw")
+            self._rate_n = 0
+            self._rate_sum = 0.0
+            self._rate_sumsq = 0.0
+            self._rate_window_t0 = now
 
 
 # ── Demo / standalone test ────────────────────────────────────────────────────

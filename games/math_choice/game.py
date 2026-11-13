@@ -37,6 +37,8 @@ import pygame
 
 from shared.gesture import CONFIG_ACCESSIBLE_FLICK_STEER, CONFIG_STANDARD
 from shared.gesture_hud import GestureHUD
+from shared.gestures import Gesture
+from shared.gestures.bindings import dispatch_bindings, poll_and_signals
 from shared.llm_coach import QwenCoach
 from shared.game_experience import (
     FireworksCelebration,
@@ -306,6 +308,7 @@ class MathChoiceGame:
     def __init__(self, screen, clock, debug=False, mode="accessible", audio=None, username=""):
         self.screen = screen
         self.clock = clock
+        self.gesture_src = None
         self.debug = debug
         self._debug = debug
         # Normalize mode ("accessible" / "astra" vs "standard" / "veera" / "keyboard")
@@ -344,10 +347,10 @@ class MathChoiceGame:
         self.level2_misses = 0
         self.level_up_threshold = 4 if self.mode == "accessible" else 5
 
-        # Tremor smoothing buffers for gyro movement (8-frame window for calmer response)
-        self._gz_hist: deque = deque(maxlen=8)
-        self._gy_hist: deque = deque(maxlen=8)
-        self._gx_hist: deque = deque(maxlen=8)
+        # Tremor smoothing buffers for gyro movement (4-frame window for snappy response)
+        self._gz_hist: deque = deque(maxlen=4)
+        self._gy_hist: deque = deque(maxlen=4)
+        self._gx_hist: deque = deque(maxlen=4)
 
         # Reticle trail & effects
         self._trail: deque = deque(maxlen=18)
@@ -935,79 +938,76 @@ class MathChoiceGame:
             self.cursor_y += (self.left_portal[1] - self.cursor_y) * min(1.0, dt * 8.0)
             self._active_input_mode = "KEYS"
 
-        # 3. Sensor Gesture & Movement Processing (MOVE vs TILT Precedence)
+        # 3. Sensor Gesture & Movement Processing (MOVE/FLICK vs TILT Precedence)
         if gs is not None:
-            raw_gz = getattr(gs, "abs_gz", 0.0)
-            raw_gy = getattr(gs, "abs_gy", 0.0)
-            raw_gx = getattr(gs, "abs_gx", 0.0)
+            events, sig = poll_and_signals(self.gesture_src, gs)
 
-            # Smooth gyro readings over 8 frames to prevent twitchy jumps
-            self._gz_hist.append(raw_gz)
-            self._gy_hist.append(raw_gy)
-            self._gx_hist.append(raw_gx)
+            self._gz_hist.append(sig.gz)
+            self._gy_hist.append(sig.gy)
             gz = sum(self._gz_hist) / len(self._gz_hist)
             gy = sum(self._gy_hist) / len(self._gy_hist)
-            gx = sum(self._gx_hist) / len(self._gx_hist)
 
-            # Horizontal movement signal:
-            # In MetaMotion convention, -gz is horizontal arm/wrist movement
-            # (moving left -> -gz < 0; moving right -> -gz > 0).
             move_horiz = -gz
             move_vert = -gy
             gyro_activity = math.hypot(gz, gy)
 
-            # Thresholds for MOVE vs resting TILT arbitration
-            move_precedence_thresh = 30.0 if self.mode == "accessible" else 38.0
-            big_move_thresh = 135.0 if self.mode == "accessible" else 165.0
+            move_precedence_thresh = 16.0 if self.mode == "accessible" else 22.0
+            big_move_thresh = 95.0 if self.mode == "accessible" else 120.0
             rest_gyro_max = 20.0 if self.mode == "accessible" else 24.0
             tilt_deadzone = 0.14 if self.mode == "accessible" else 0.18
 
             vx = 0.0
             vy = 0.0
 
-            # ── CASE A: User is making a bigger / active MOVE gesture ────────
-            # Move takes 100% precedence over tilt! Even if the wrist is tilted
-            # right while moving left, tilt is completely ignored.
-            if abs(move_horiz) >= move_precedence_thresh:
-                self._move_override_timer = 0.55  # lock out tilt for 0.55s after moving
+            def _swing_toward(move_side: str):
+                self._move_override_timer = 0.55
                 self._active_input_mode = "MOVE"
+                if self._swipe_cooldown <= 0 and self._wrong_side_eliminated != move_side:
+                    target = self.left_portal if move_side == "left" else self.right_portal
+                    self.cursor_x += (target[0] - self.cursor_x) * min(1.0, dt * 14.0)
+                    self.cursor_y += (target[1] - self.cursor_y) * min(1.0, dt * 14.0)
+                    self.dwell_side = move_side
+                    self.dwell_timer = max(self.dwell_timer, self.dwell_required * 0.65)
+                    self._swipe_cooldown = 0.45
 
-                gyro_scale_x = (4.2 if self.mode == "accessible" else 3.5) * self.sc
-                gyro_scale_y = (3.0 if self.mode == "accessible" else 2.5) * self.sc
+            dispatch_bindings(
+                events,
+                {
+                    Gesture.FLICK_LEFT: lambda _e: _swing_toward("left"),
+                    Gesture.HOLD_LEFT: lambda _e: _swing_toward("left"),
+                    Gesture.FLICK_RIGHT: lambda _e: _swing_toward("right"),
+                    Gesture.HOLD_RIGHT: lambda _e: _swing_toward("right"),
+                },
+            )
+
+            if abs(move_horiz) >= move_precedence_thresh:
+                self._move_override_timer = 0.55
+                self._active_input_mode = "MOVE"
+                gyro_scale_x = (6.0 if self.mode == "accessible" else 5.0) * self.sc
+                gyro_scale_y = (3.8 if self.mode == "accessible" else 3.2) * self.sc
                 vx = move_horiz * gyro_scale_x
-                vy = (0.0 if abs(move_vert) < 20.0 else move_vert) * gyro_scale_y
+                vy = (0.0 if abs(move_vert) < 16.0 else move_vert) * gyro_scale_y
 
-                # If the user makes a deliberate, bigger directional swing toward
-                # an answer, smoothly carry the reticle into that portal!
                 if abs(move_horiz) >= big_move_thresh and self._swipe_cooldown <= 0:
                     move_side = "left" if move_horiz < 0 else "right"
                     if self._wrong_side_eliminated != move_side:
                         target = self.left_portal if move_side == "left" else self.right_portal
-                        # Glide strongly toward target portal
                         self.cursor_x += (target[0] - self.cursor_x) * min(1.0, dt * 14.0)
                         self.cursor_y += (target[1] - self.cursor_y) * min(1.0, dt * 14.0)
-                        # If it's a very strong, unmistakable swing (>= 195 deg/s),
-                        # give a helpful boost to the dwell lock-in timer
-                        if abs(move_horiz) >= 195.0:
+                        if abs(move_horiz) >= 150.0:
                             self.dwell_side = move_side
                             self.dwell_timer = max(self.dwell_timer, self.dwell_required * 0.65)
                             self._swipe_cooldown = 0.45
-
-            # ── CASE B: Holdover window right after an active MOVE ───────────
-            # Prevents a tilted wrist from pulling the reticle back the wrong way
-            # as the user's hand slows down at the end of a move.
             elif self._move_override_timer > 0:
                 self._active_input_mode = "MOVE"
-                if abs(move_horiz) >= 14.0:
-                    gyro_scale_x = (3.6 if self.mode == "accessible" else 3.0) * self.sc
+                if abs(move_horiz) >= 12.0:
+                    gyro_scale_x = (4.8 if self.mode == "accessible" else 4.0) * self.sc
                     vx = move_horiz * gyro_scale_x
-
-            # ── CASE C: Hand is resting still in space -> TILT takes precedence
-            elif gyro_activity <= rest_gyro_max and abs(gs.paddle_velocity) >= tilt_deadzone:
+            elif gyro_activity <= rest_gyro_max and abs(sig.tilt_x) >= tilt_deadzone:
                 self._active_input_mode = "TILT"
                 tilt_speed = (340.0 if self.mode == "accessible" else 300.0) * self.sc
-                vx = gs.paddle_velocity * tilt_speed
-                vy = getattr(gs, "tilt_y", 0.0) * (160.0 * self.sc)
+                vx = sig.tilt_x * tilt_speed
+                vy = sig.tilt_y * (160.0 * self.sc)
             else:
                 self._active_input_mode = "IDLE"
 
@@ -1070,6 +1070,7 @@ class MathChoiceGame:
     # ── Main Game Loop ────────────────────────────────────────────────────────
 
     def run(self, interpreter) -> str:
+        self.gesture_src = interpreter
         if interpreter and getattr(interpreter, "config", None) is not None:
             if self.mode == "accessible":
                 interpreter.config = CONFIG_ACCESSIBLE_FLICK_STEER
@@ -1306,11 +1307,12 @@ class MathChoiceGame:
 
         # 10. Debug overlay (D key)
         if self.debug and gs is not None:
+            sig = self.gesture_src.signals() if (self.gesture_src and hasattr(self.gesture_src, "signals")) else None
+            tilt_str = f"({sig.tilt_x:+.2f}, {sig.tilt_y:+.2f})" if sig is not None else f"({gs.tilt_y:+.2f})"
             dbg_txt = (
                 f"Input: {self._active_input_mode}  "
                 f"Cursor: ({int(self.cursor_x)}, {int(self.cursor_y)})  "
-                f"TiltVel: {gs.paddle_velocity:+.2f}  "
-                f"MoveHoriz(-GyroZ): {-gs.abs_gz:+.1f}"
+                f"Tilt: {tilt_str}"
             )
             ds = self.font_small.render(dbg_txt, True, NEON_GREEN)
             self.screen.blit(ds, (int(16 * sc), self.H - int(28 * sc)))
