@@ -421,31 +421,56 @@ class MetaMotionSensor:
 
     # ── BLE operations ─────────────────────────────────────────────────────────
 
-    async def scan(self) -> Optional[str]:
-        """Scan for the first MetaWear/MetaMotion device and return its address."""
-        logger.info("Scanning for MetaMotion device (%.0fs)…", self.scan_timeout)
+    @staticmethod
+    def _is_metawear_device(device, adv=None) -> bool:
+        """Return True if a scanned BLE device looks like a MetaWear/MetaMotion board."""
+        name = getattr(device, "name", None) or ""
+        local_name = (getattr(adv, "local_name", None) or "") if adv is not None else ""
+        if any(k in name or k in local_name for k in ("MetaWear", "MetaMotion", "MWC", "MMS")):
+            return True
+
+        target_uuid = METAWEAR_SERVICE_UUID.lower()
+        if adv is not None:
+            adv_uuids = [str(u).lower() for u in (getattr(adv, "service_uuids", None) or [])]
+            if target_uuid in adv_uuids:
+                return True
+
+        metadata = getattr(device, "metadata", None)
+        if isinstance(metadata, dict):
+            meta_uuids = [str(u).lower() for u in (metadata.get("uuids") or [])]
+            if target_uuid in meta_uuids:
+                return True
+        return False
+
+    @classmethod
+    async def discover_devices(cls, timeout: float = 10.0) -> list[tuple[str, str, Optional[int]]]:
+        """Scan for all MetaWear/MetaMotion devices and return [(name, address, rssi), ...]."""
+        logger.info("Scanning for MetaMotion devices (%.0fs)…", timeout)
 
         # NOTE: on macOS, Core Bluetooth assigns a per-host UUID instead of
         # the real MAC address.  bleak uses that UUID to connect correctly.
-        devices = await BleakScanner.discover(timeout=self.scan_timeout)
+        results = await BleakScanner.discover(timeout=timeout, return_adv=True)
+        found: list[tuple[str, str, Optional[int]]] = []
+        seen_addresses: set[str] = set()
+        for device, adv in results.values():
+            if device.address in seen_addresses:
+                continue
+            if cls._is_metawear_device(device, adv):
+                seen_addresses.add(device.address)
+                name = device.name or getattr(adv, "local_name", None) or device.address
+                rssi = getattr(adv, "rssi", None)
+                found.append((name, device.address, rssi))
+        found.sort(key=lambda item: item[2] if item[2] is not None else -999, reverse=True)
+        return found
 
-        # Name-based match
-        for d in devices:
-            name = d.name or ""
-            if any(k in name for k in ("MetaWear", "MetaMotion", "MWC", "MMS")):
-                self._device_name = name
-                logger.info("MetaWear detected: '%s'  [%s]", name, d.address)
-                return d.address
-
-        # UUID-based fallback
-        for d in devices:
-            metadata = getattr(d, "metadata", None)
-            if isinstance(metadata, dict):
-                uuids = [str(u).lower() for u in (metadata.get("uuids") or [])]
-                if METAWEAR_SERVICE_UUID.lower() in uuids:
-                    self._device_name = d.name or d.address
-                    logger.info("MetaWear detected (by UUID): '%s'  [%s]", d.name, d.address)
-                    return d.address
+    async def scan(self) -> Optional[str]:
+        """Scan for the first MetaWear/MetaMotion device and return its address."""
+        devices = await self.discover_devices(timeout=self.scan_timeout)
+        if devices:
+            name, address, _rssi = devices[0]
+            self._device_name = name
+            logger.info("MetaWear detected: '%s'  [%s]", name, address)
+            return address
 
         logger.warning("No MetaMotion device found in scan.")
         return None

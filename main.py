@@ -40,6 +40,7 @@ import asyncio
 import logging
 import sys
 import time
+from typing import List, Optional, Tuple
 
 import pygame
 
@@ -193,6 +194,33 @@ def _resolve_mode(args: argparse.Namespace) -> str:
     return "accessible"   # sensor connected → ASTRA mode by default
 
 
+def _prompt_device_selection(devices: List[Tuple[str, str, Optional[int]]]) -> str:
+    """Display detected MetaMotion devices and prompt if more than one is found."""
+    print(f"[main] Detected {len(devices)} MetaMotion device(s):")
+    for idx, (name, address, rssi) in enumerate(devices, start=1):
+        rssi_str = f"  rssi={rssi} dBm" if rssi is not None else ""
+        print(f"  [{idx}] {name:<25} {address}{rssi_str}")
+
+    if len(devices) == 1:
+        _name, address, _rssi = devices[0]
+        print(f"[main] Single device found — connecting automatically to {address}")
+        return address
+
+    while True:
+        try:
+            choice = input(f"Select device [1-{len(devices)}] (default 1): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit(1)
+        if choice == "":
+            return devices[0][1]
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(devices):
+                return devices[idx - 1][1]
+        print(f"Please enter a number between 1 and {len(devices)}.")
+
+
 def _build_gesture_source(args: argparse.Namespace, mode: str):
     """Build and start the appropriate gesture source. Returns (gesture_src, sensor)."""
     if mode == "keyboard":
@@ -210,10 +238,23 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
     _print_splash(label)
     _print_controls()
 
+    target_address = args.address
+    if target_address is None:
+        print("[main] Scanning for MetaMotion devices…  (make sure Bluetooth is on)")
+        devices = asyncio.run(MetaMotionSensor.discover_devices(timeout=12.0))
+        if not devices:
+            print("\n[main] No MetaMotion device found.")
+            print("[main] Falling back to keyboard mode.\n")
+            from shared.gesture import KeyboardFallback
+            gs = KeyboardFallback()
+            gs.start()
+            return gs, None
+        target_address = _prompt_device_selection(devices)
+
     sensor = MetaMotionSensor(scan_timeout=12, sf_profile=getattr(args, "sf_profile", "full"))
     print("[main] Starting sensor…  (make sure Bluetooth is on)")
     try:
-        sensor.start_background(address=args.address)
+        sensor.start_background(address=target_address)
     except RuntimeError as exc:
         print(f"\n[main] Could not connect to sensor: {exc}")
         print("[main] Falling back to keyboard mode.\n")
@@ -245,6 +286,10 @@ def main() -> None:
         asyncio.run(_scan_and_print())
         sys.exit(0)
 
+    # ── Determine mode and build gesture source before opening pygame window ─
+    mode = _resolve_mode(args)
+    gesture_src, sensor = _build_gesture_source(args, mode)
+
     # ── Initialize pygame once (owned here for the full session) ──────────
     pygame.mixer.pre_init(44100, -16, 2, 512)   # request quality before init
     pygame.init()
@@ -254,10 +299,6 @@ def main() -> None:
         screen = pygame.display.set_mode((800, 600))
     pygame.display.set_caption("Arcade for All")
     clock  = pygame.time.Clock()
-
-    # ── Determine mode and build gesture source ───────────────────────────
-    mode = _resolve_mode(args)
-    gesture_src, sensor = _build_gesture_source(args, mode)
     recorder = None
     if args.record and sensor is not None:
         from shared.recorder import SampleRecorder
