@@ -69,7 +69,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--address", metavar="ADDR",
-        help="BLE address of the MetaMotion device (skip scan)"
+        help="BLE address of the primary (wrist) MetaMotion device (skip scan)"
+    )
+    p.add_argument(
+        "--upper-address", metavar="ADDR", default=None,
+        help="Optional BLE address of the secondary (upper arm) MetaMotion device"
     )
     p.add_argument(
         "--keyboard", action="store_true",
@@ -221,6 +225,99 @@ def _prompt_device_selection(devices: List[Tuple[str, str, Optional[int]]]) -> s
         print(f"Please enter a number between 1 and {len(devices)}.")
 
 
+def _identify_twin_sensors(
+    devices: List[Tuple[str, str, Optional[int]]],
+    sensor_factory=None,
+) -> Tuple[str, Optional[str]]:
+    """Ping each detected sensor with blink + vibrate so the user assigns Wrist vs Upper Arm."""
+    if sensor_factory is None:
+        from shared.sensor import MetaMotionSensor
+        sensor_factory = MetaMotionSensor
+
+    wrist_addr: Optional[str] = None
+    upper_addr: Optional[str] = None
+
+    for name, address, _rssi in devices:
+        if wrist_addr and upper_addr:
+            break
+        probe = sensor_factory(scan_timeout=8, sf_profile="lean")
+        connected = False
+        try:
+            probe.start_background(address=address)
+            connected = probe.is_connected()
+            if connected:
+                probe.set_ambient_light(on=True, color=2, blink=True)
+                probe.vibrate(0.35)
+        except Exception as exc:
+            print(f"[main] Could not ping {name} ({address}): {exc}")
+
+        while True:
+            try:
+                ans = input(
+                    f"Sensor '{name}' ({address}) is blinking/vibrating — "
+                    "Position [1] Wrist, [2] Upper Arm, [s] Skip: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                if connected:
+                    probe.set_ambient_light(on=False)
+                    probe.stop_background()
+                print()
+                raise SystemExit(1)
+
+            if ans == "1" and wrist_addr is None:
+                wrist_addr = address
+                if connected:
+                    probe.set_ambient_light(on=True, color=0, blink=False)  # solid Green = Wrist
+                break
+            elif ans == "2" and upper_addr is None:
+                upper_addr = address
+                if connected:
+                    probe.set_ambient_light(on=True, color=2, blink=False)  # solid Blue = Upper Arm
+                break
+            elif ans == "s":
+                if connected:
+                    probe.set_ambient_light(on=False)
+                break
+            else:
+                print("Please enter 1 (Wrist), 2 (Upper Arm), or s (Skip) for an unassigned role.")
+
+        if connected:
+            probe.stop_background()
+
+    if wrist_addr is None:
+        # Fallback: pick first device as wrist if user skipped everything
+        wrist_addr = devices[0][1] if upper_addr != devices[0][1] else devices[1][1]
+    return wrist_addr, upper_addr
+
+
+def _prompt_sensor_setup(
+    devices: List[Tuple[str, str, Optional[int]]],
+    sensor_factory=None,
+) -> Tuple[str, Optional[str]]:
+    """Prompt Single (default on Enter) vs Twin sensors when multiple devices are detected."""
+    if len(devices) <= 1:
+        return _prompt_device_selection(devices), None
+
+    print(f"[main] Detected {len(devices)} MetaMotion device(s):")
+    for idx, (name, address, rssi) in enumerate(devices, start=1):
+        rssi_str = f"  rssi={rssi} dBm" if rssi is not None else ""
+        print(f"  [{idx}] {name:<25} {address}{rssi_str}")
+
+    while True:
+        try:
+            mode_choice = input(
+                "Use [1] Single sensor (default) or [2] Twin sensors (wrist + upper arm) [1]: "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise SystemExit(1)
+        if mode_choice in ("", "1"):
+            return _prompt_device_selection(devices), None
+        if mode_choice == "2":
+            return _identify_twin_sensors(devices, sensor_factory=sensor_factory)
+        print("Please enter 1 (Single) or 2 (Twin).")
+
+
 def _build_gesture_source(args: argparse.Namespace, mode: str):
     """Build and start the appropriate gesture source. Returns (gesture_src, sensor)."""
     if mode == "keyboard":
@@ -239,6 +336,7 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
     _print_controls()
 
     target_address = args.address
+    upper_address = getattr(args, "upper_address", None)
     if target_address is None:
         print("[main] Scanning for MetaMotion devices…  (make sure Bluetooth is on)")
         devices = asyncio.run(MetaMotionSensor.discover_devices(timeout=12.0))
@@ -249,9 +347,21 @@ def _build_gesture_source(args: argparse.Namespace, mode: str):
             gs = KeyboardFallback()
             gs.start()
             return gs, None
-        target_address = _prompt_device_selection(devices)
+        target_address, detected_upper = _prompt_sensor_setup(devices)
+        if upper_address is None:
+            upper_address = detected_upper
 
-    sensor = MetaMotionSensor(scan_timeout=12, sf_profile=getattr(args, "sf_profile", "full"))
+    sf_profile = getattr(args, "sf_profile", "full")
+    if upper_address:
+        from shared.dual_sensor import DualSensorHub
+        sensor = DualSensorHub(
+            wrist_mac=target_address,
+            upper_arm_mac=upper_address,
+            scan_timeout=12,
+            sf_profile=sf_profile,
+        )
+    else:
+        sensor = MetaMotionSensor(scan_timeout=12, sf_profile=sf_profile)
     print("[main] Starting sensor…  (make sure Bluetooth is on)")
     try:
         sensor.start_background(address=target_address)

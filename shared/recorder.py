@@ -10,10 +10,11 @@ Format: one JSON object per line:
 
 from __future__ import annotations
 
+import csv
 import json
 import threading
 from pathlib import Path
-from typing import Iterable, List, Optional, TextIO, Union
+from typing import Iterable, List, Optional, Sequence, TextIO, Union
 
 from shared.sensor import IMUSample
 
@@ -120,6 +121,91 @@ class SampleRecorder:
                 self._fh = None
 
     def __enter__(self) -> "SampleRecorder":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+DUAL_DATASET_COLUMNS = [
+    "timestamp",
+    "dual_sensor_active",
+    "pos_x",
+    "pos_y",
+    "pos_z",
+    "wrist_qw",
+    "wrist_qx",
+    "wrist_qy",
+    "wrist_qz",
+    "upper_qw",
+    "upper_qx",
+    "upper_qy",
+    "upper_qz",
+    "lin_acc_x",
+    "lin_acc_y",
+    "lin_acc_z",
+    "gesture_label",
+]
+
+
+class DualArmDatasetLogger:
+    """Thread-safe synchronized CSV dataset logger for single or twin-sensor 3D arm data."""
+
+    def __init__(self, path: Union[str, Path]):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh: Optional[TextIO] = self.path.open("w", newline="", encoding="utf-8")
+        self._writer = csv.writer(self._fh)
+        self._writer.writerow(DUAL_DATASET_COLUMNS)
+        self._lock = threading.Lock()
+        self.count: int = 0
+
+    def log(
+        self,
+        timestamp: float,
+        dual_sensor_active: bool,
+        pos_xyz: Sequence[float] = (0.0, 0.0, 0.0),
+        wrist_q: Sequence[float] = (1.0, 0.0, 0.0, 0.0),
+        upper_q: Optional[Sequence[float]] = None,
+        lin_acc: Sequence[float] = (0.0, 0.0, 0.0),
+        gesture_label: str = "",
+    ) -> None:
+        uq = upper_q if upper_q is not None else (0.0, 0.0, 0.0, 0.0)
+        row = [
+            round(float(timestamp), 6),
+            bool(dual_sensor_active),
+            round(float(pos_xyz[0]), 4),
+            round(float(pos_xyz[1]), 4),
+            round(float(pos_xyz[2]), 4),
+            round(float(wrist_q[0]), 6),
+            round(float(wrist_q[1]), 6),
+            round(float(wrist_q[2]), 6),
+            round(float(wrist_q[3]), 6),
+            round(float(uq[0]), 6),
+            round(float(uq[1]), 6),
+            round(float(uq[2]), 6),
+            round(float(uq[3]), 6),
+            round(float(lin_acc[0]), 6),
+            round(float(lin_acc[1]), 6),
+            round(float(lin_acc[2]), 6),
+            str(gesture_label),
+        ]
+        with self._lock:
+            if self._fh is None:
+                return
+            self._writer.writerow(row)
+            self.count += 1
+            if self.count % 50 == 0:
+                self._fh.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is not None:
+                self._fh.flush()
+                self._fh.close()
+                self._fh = None
+
+    def __enter__(self) -> "DualArmDatasetLogger":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

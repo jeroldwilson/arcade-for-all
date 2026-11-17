@@ -86,6 +86,11 @@ class Frame:
     tilt_y: float = 0.0
     av_magnitude: float = 0.0                  # |ω| (°/s)
     calibrated: bool = False
+    # Optional 2-segment Forward Kinematics 3D wrist position (cm from resting origin)
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    pos_z: float = 0.0
+    dual_sensor_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,10 @@ class Signals:
     hold_progress: float = 0.0  # 0..1 while a hold is arming
     hold_direction: str = ""
     calibrated: bool = False
+    pos_x: float = 0.0          # cm from resting origin (dual-sensor FK)
+    pos_y: float = 0.0
+    pos_z: float = 0.0
+    dual_sensor_active: bool = False
 
 
 class Detector(Protocol):

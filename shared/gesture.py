@@ -36,6 +36,7 @@ from shared.gestures.detectors import (
     FLICK_UP_GY_SIGN, FlickDetector, SliceAdapter, SteerDetector, TwistDetector,
 )
 from shared.gestures.types import Detector, Frame, Gesture, GestureEvent, Signals
+from shared.kinematics import ArmKinematics2Seg, KinematicsState
 from shared.sensor import IMUSample, StreamChannel
 
 
@@ -191,6 +192,11 @@ class GestureState:
     hw_fusion_valid: bool = False
     # True after ~3 s of no samples — games can show a "sensor disconnected" overlay
     sensor_disconnected: bool = False
+    # Optional 2-segment Forward Kinematics 3D wrist position (cm from resting origin)
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    pos_z: float = 0.0
+    dual_sensor_active: bool = False
 
 
 # ── Main interpreter ──────────────────────────────────────────────────────────
@@ -230,6 +236,7 @@ class GestureInterpreter:
             rom_down_deg=self._tilt_max_to_rom_deg(self.config.tilt_max),
         )
         self.frontend = Frontend(fe_cfg)
+        self.kinematics = ArmKinematics2Seg()
         self.buffer: deque = deque(maxlen=500)  # ~5–10 s of Frames
 
         # Built-in detector plug-ins
@@ -648,14 +655,26 @@ class GestureInterpreter:
 
         qw, qx, qy, qz = self.frontend.q_abs
 
+        # 6b. Optional 2-segment Forward Kinematics when DualSensorHub is active
+        k_state = KinematicsState(dual_sensor_active=False, calibrated=frame.calibrated)
+        if self._sensor is not None and hasattr(self._sensor, "get_latest_upper_sample"):
+            upper_s = self._sensor.get_latest_upper_sample()
+            if upper_s is not None and upper_s.hw_fusion_valid:
+                q_upper = (upper_s.hw_qw, upper_s.hw_qx, upper_s.hw_qy, upper_s.hw_qz)
+                k_state = self.kinematics.update(frame.t, (qw, qx, qy, qz), q_upper)
+
         # 7. Gesture-level auto-haptics removed: haptics are reserved for
         #    score celebrations and >30s rest reminders (in game_experience.py).
 
         # 8. Publish under lock
         with self._lock:
             self._events.extend(events)
-            self._signals = self.frontend.signals(
-                hold_progress=hold_prog, hold_direction=hold_dir
+            self._signals = replace(
+                self.frontend.signals(hold_progress=hold_prog, hold_direction=hold_dir),
+                pos_x=k_state.pos_x,
+                pos_y=k_state.pos_y,
+                pos_z=k_state.pos_z,
+                dual_sensor_active=k_state.dual_sensor_active,
             )
 
             self.state.paddle_velocity = velocity
@@ -699,6 +718,10 @@ class GestureInterpreter:
                 self.state.mag_cal_state = self._sensor.mag_cal_state
             self.state.hw_heading = s.hw_heading
             self.state.hw_fusion_valid = s.hw_fusion_valid
+            self.state.pos_x = k_state.pos_x
+            self.state.pos_y = k_state.pos_y
+            self.state.pos_z = k_state.pos_z
+            self.state.dual_sensor_active = k_state.dual_sensor_active
 
         self._sample_count += 1
         if self._sample_count % 10 == 0:

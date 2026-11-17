@@ -2,6 +2,7 @@ import pygame
 import pygame.gfxdraw
 import math
 import time
+from collections import deque
 from typing import Optional, Tuple, List, Sequence
 from shared.gesture import GestureState
 
@@ -282,6 +283,7 @@ class GestureHUD:
         self.finger_splay = 0.0       # dynamic finger spread during active gestures
 
         self.flick_cooldown = 0.0
+        self._traj_3d: deque = deque(maxlen=45)
 
         # Badge state
         self.active_gesture_text = ""
@@ -898,7 +900,23 @@ class GestureHUD:
 
         screen.blit(self._led_surf, (led_x - lc, led_y - lc))
 
-        # ── 6. GESTURE BADGES & ANGLE READOUT ────────────────────────────────
+        # ── 6. DUAL-SENSOR 3D TRAJECTORY ARC (when active) ──────────────────
+        if getattr(gs, "dual_sensor_active", False):
+            px = float(getattr(gs, "pos_x", 0.0))
+            py = float(getattr(gs, "pos_y", 0.0))
+            pz = float(getattr(gs, "pos_z", 0.0))
+            self._traj_3d.append((px, py, pz))
+            if len(self._traj_3d) >= 2:
+                pts_2d = []
+                for tx, ty, tz in self._traj_3d:
+                    # Map cm reach (-40..+40 cm) into HUD coordinates around center
+                    sx = int(center_x + max(-1.0, min(1.0, tx / 40.0)) * (hud_r * 0.72))
+                    sy = int(center_y - max(-1.0, min(1.0, tz / 40.0)) * (hud_r * 0.72))
+                    pts_2d.append((sx, sy))
+                pygame.draw.aalines(screen, (90, 235, 255), False, pts_2d)
+                self._aa_circle(screen, (120, 255, 190), pts_2d[-1][0], pts_2d[-1][1], 4)
+
+        # ── 7. GESTURE BADGES & ANGLE READOUT ────────────────────────────────
         if self.gesture_timer > 0:
             self.gesture_timer -= dt
             badge_text = self.font_badge.render(self.active_gesture_text, True, self.active_gesture_color)
