@@ -137,6 +137,7 @@ class FrontendConfig:
     # PCA functional axis rotation (radians)
     axis_theta_rad: float = 0.0
     # Adaptive baseline (washout) — re-centers smoothly when resting after a gesture
+    washout_enabled: bool = True
     adapt_tau_s: float = 3.0            # normal washout time constant
     adapt_still_tau_s: float = 1.2      # faster re-baseline after resting > 0.6 s
     adapt_gyro_threshold: float = 45.0  # °/s — adapt only below this
@@ -241,7 +242,7 @@ class Frontend:
                     or len(self._cal_q) >= self.cfg.calibration_samples):
                 self._finish_calibration()
                 # Recompute neutral-frame alignment immediately so this sample is usable
-        elif not self.adapt_paused and av < self.cfg.adapt_gyro_threshold:
+        elif self.cfg.washout_enabled and not self.adapt_paused and av < self.cfg.adapt_gyro_threshold:
             if av < 12.0:
                 if self._still_since is None:
                     self._still_since = t

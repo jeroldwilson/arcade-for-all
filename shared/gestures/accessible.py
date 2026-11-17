@@ -18,6 +18,7 @@ import math
 from typing import Iterable, List, Sequence
 
 from shared.gestures.types import Frame, Gesture, GestureEvent
+from shared.sensor import StreamChannel
 
 
 class HoldDetector:
@@ -29,6 +30,7 @@ class HoldDetector:
     """
 
     IDLE, ARMING, FIRED = "IDLE", "ARMING", "FIRED"
+    required_channels = StreamChannel.QUAT
 
     def __init__(self, axis: str = "x", t_on: float = 0.25, t_off: float = 0.15,
                  hold_time: float = 0.6, name: str = ""):
@@ -93,6 +95,8 @@ class DwellDetector:
     anchor for `dwell_time`, while at least `min_offset` away from neutral
     (so resting at centre never fires).  Re-arms after leaving the circle."""
 
+    required_channels = StreamChannel.QUAT
+
     def __init__(self, dwell_time: float = 1.0, radius: float = 0.12,
                  min_offset: float = 0.25, name: str = "dwell"):
         self.name = name
@@ -137,6 +141,8 @@ class DwellDetector:
 class AnyMoveDetector:
     """Single-switch trigger: |ω| above `threshold` (°/s) for `min_duration` s."""
 
+    required_channels = StreamChannel.GYRO
+
     def __init__(self, threshold: float = 40.0, min_duration: float = 0.2,
                  cooldown: float = 1.0, name: str = "any_move"):
         self.name = name
@@ -170,6 +176,8 @@ class AnyMoveDetector:
 
 class StillDetector:
     """STILL after `still_time` s with |ω| < threshold — only after real movement."""
+
+    required_channels = StreamChannel.GYRO
 
     def __init__(self, threshold: float = 10.0, still_time: float = 2.0,
                  name: str = "still"):

@@ -979,46 +979,63 @@ class MathChoiceGame:
                     self.dwell_timer = max(self.dwell_timer, self.dwell_required * 0.65)
                     self._swipe_cooldown = 0.45
 
-            dispatch_bindings(
-                events,
-                {
-                    Gesture.FLICK_LEFT: lambda _e: _swing_toward("left"),
-                    Gesture.HOLD_LEFT: lambda _e: _swing_toward("left"),
-                    Gesture.FLICK_RIGHT: lambda _e: _swing_toward("right"),
-                    Gesture.HOLD_RIGHT: lambda _e: _swing_toward("right"),
-                },
-            )
-
-            if abs(move_horiz) >= move_precedence_thresh:
-                self._move_override_timer = 0.55
-                self._active_input_mode = "MOVE"
-                gyro_scale_x = (6.0 if self.mode == "accessible" else 5.0) * self.sc
-                gyro_scale_y = (3.8 if self.mode == "accessible" else 3.2) * self.sc
-                vx = move_horiz * gyro_scale_x
-                vy = (0.0 if abs(move_vert) < 16.0 else move_vert) * gyro_scale_y
-
-                if abs(move_horiz) >= big_move_thresh and self._swipe_cooldown <= 0:
-                    move_side = "left" if move_horiz < 0 else "right"
-                    if self._wrong_side_eliminated != move_side:
-                        target = self.left_portal if move_side == "left" else self.right_portal
-                        self.cursor_x += (target[0] - self.cursor_x) * min(1.0, dt * 14.0)
-                        self.cursor_y += (target[1] - self.cursor_y) * min(1.0, dt * 14.0)
-                        if abs(move_horiz) >= 150.0:
-                            self.dwell_side = move_side
-                            self.dwell_timer = max(self.dwell_timer, self.dwell_required * 0.65)
-                            self._swipe_cooldown = 0.45
-            elif self._move_override_timer > 0:
-                self._active_input_mode = "MOVE"
-                if abs(move_horiz) >= 12.0:
-                    gyro_scale_x = (4.8 if self.mode == "accessible" else 4.0) * self.sc
-                    vx = move_horiz * gyro_scale_x
-            elif gyro_activity <= rest_gyro_max and abs(sig.tilt_x) >= tilt_deadzone:
-                self._active_input_mode = "TILT"
-                tilt_speed = (340.0 if self.mode == "accessible" else 300.0) * self.sc
-                vx = sig.tilt_x * tilt_speed
-                vy = sig.tilt_y * (160.0 * self.sc)
+            if self.mode == "accessible":
+                # Single clean paradigm for CP ASTRA: locked-baseline tilt + hold_x assist.
+                # No competing gyro MOVE override or rebase-on-rest washout.
+                dispatch_bindings(
+                    events,
+                    {
+                        Gesture.HOLD_LEFT: lambda _e: _swing_toward("left"),
+                        Gesture.HOLD_RIGHT: lambda _e: _swing_toward("right"),
+                    },
+                )
+                if abs(sig.tilt_x) >= tilt_deadzone:
+                    self._active_input_mode = "TILT"
+                    vx = sig.tilt_x * (340.0 * self.sc)
+                    vy = sig.tilt_y * (160.0 * self.sc)
+                else:
+                    self._active_input_mode = "IDLE"
             else:
-                self._active_input_mode = "IDLE"
+                dispatch_bindings(
+                    events,
+                    {
+                        Gesture.FLICK_LEFT: lambda _e: _swing_toward("left"),
+                        Gesture.HOLD_LEFT: lambda _e: _swing_toward("left"),
+                        Gesture.FLICK_RIGHT: lambda _e: _swing_toward("right"),
+                        Gesture.HOLD_RIGHT: lambda _e: _swing_toward("right"),
+                    },
+                )
+
+                if abs(move_horiz) >= move_precedence_thresh:
+                    self._move_override_timer = 0.55
+                    self._active_input_mode = "MOVE"
+                    gyro_scale_x = 5.0 * self.sc
+                    gyro_scale_y = 3.2 * self.sc
+                    vx = move_horiz * gyro_scale_x
+                    vy = (0.0 if abs(move_vert) < 16.0 else move_vert) * gyro_scale_y
+
+                    if abs(move_horiz) >= big_move_thresh and self._swipe_cooldown <= 0:
+                        move_side = "left" if move_horiz < 0 else "right"
+                        if self._wrong_side_eliminated != move_side:
+                            target = self.left_portal if move_side == "left" else self.right_portal
+                            self.cursor_x += (target[0] - self.cursor_x) * min(1.0, dt * 14.0)
+                            self.cursor_y += (target[1] - self.cursor_y) * min(1.0, dt * 14.0)
+                            if abs(move_horiz) >= 150.0:
+                                self.dwell_side = move_side
+                                self.dwell_timer = max(self.dwell_timer, self.dwell_required * 0.65)
+                                self._swipe_cooldown = 0.45
+                elif self._move_override_timer > 0:
+                    self._active_input_mode = "MOVE"
+                    if abs(move_horiz) >= 12.0:
+                        gyro_scale_x = 4.0 * self.sc
+                        vx = move_horiz * gyro_scale_x
+                elif gyro_activity <= rest_gyro_max and abs(sig.tilt_x) >= tilt_deadzone:
+                    self._active_input_mode = "TILT"
+                    tilt_speed = 300.0 * self.sc
+                    vx = sig.tilt_x * tilt_speed
+                    vy = sig.tilt_y * (160.0 * self.sc)
+                else:
+                    self._active_input_mode = "IDLE"
 
             self.cursor_x += vx * dt
             self.cursor_y += vy * dt
@@ -1085,7 +1102,9 @@ class MathChoiceGame:
         self._inactivity.sensor = sensor
         if interpreter and getattr(interpreter, "config", None) is not None:
             if self.mode == "accessible":
-                interpreter.config = CONFIG_ACCESSIBLE_FLICK_STEER
+                # Use locked-baseline tilt + hold_x (no washout/rebase-on-rest, no competing gyro MOVE)
+                if hasattr(interpreter, "set_detector_profile"):
+                    interpreter.set_detector_profile({"hold_x"}, washout_enabled=False)
             else:
                 interpreter.config = CONFIG_STANDARD
 
@@ -1113,6 +1132,8 @@ class MathChoiceGame:
                     self.tts.stop()
                     if self.audio:
                         self.audio.stop_background()
+                    if interpreter and hasattr(interpreter, "reset_profile"):
+                        interpreter.reset_profile()
                     return "quit"
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
@@ -1120,6 +1141,8 @@ class MathChoiceGame:
                         self.tts.stop()
                         if self.audio:
                             self.audio.stop_background()
+                        if interpreter and hasattr(interpreter, "reset_profile"):
+                            interpreter.reset_profile()
                         if self.score > 0:
                             GameExitAppreciationScreen(
                                 self.screen, self.clock, self.display_name, self.score

@@ -21,7 +21,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ from shared.gestures.detectors import (
     FLICK_UP_GY_SIGN, FlickDetector, SliceAdapter, SteerDetector, TwistDetector,
 )
 from shared.gestures.types import Detector, Frame, Gesture, GestureEvent, Signals
-from shared.sensor import IMUSample
+from shared.sensor import IMUSample, StreamChannel
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -84,6 +84,7 @@ class GestureConfig:
 
     # Gyroscope magnitude (°/s) below which the adaptive baseline is allowed to
     # drift toward the current resting gravity vector.
+    washout_enabled: bool = True
     gyro_adapt_threshold: float = 45.0
 
     # Rate at which the adaptive baseline drifts toward rest (0.002 @ 100 Hz → τ ≈ 5 s).
@@ -258,6 +259,8 @@ class GestureInterpreter:
         )
         self._still_det = StillDetector()
         self._extra_detectors: List[Detector] = []
+        self._enabled_detectors: Optional[Set[str]] = None
+        self._default_washout_enabled: bool = self.config.washout_enabled
 
         self.gate = SpasmGate(
             min_burst_s=self.config.spasm_min_burst_s,
@@ -313,7 +316,49 @@ class GestureInterpreter:
         ]
         if self.config.flick_steer_enabled:
             base.insert(1, self._steer_det)
-        return base + self._extra_detectors
+        all_dets = base + self._extra_detectors
+        if self._enabled_detectors is None:
+            return all_dets
+        return [d for d in all_dets if getattr(d, "name", "") in self._enabled_detectors]
+
+    def set_detector_profile(
+        self,
+        detector_names: Optional[Set[str]] = None,
+        washout_enabled: Optional[bool] = None,
+        extra_channels: StreamChannel = StreamChannel.NONE,
+    ) -> StreamChannel:
+        """Scope active detectors to what the current game needs and update sensor subscriptions."""
+        with self._lock:
+            self._enabled_detectors = set(detector_names) if detector_names is not None else None
+            if washout_enabled is not None:
+                self.config.washout_enabled = washout_enabled
+                self.frontend.cfg.washout_enabled = washout_enabled
+            channels = extra_channels
+            for d in self.detectors:
+                d.reset()
+                channels |= getattr(d, "required_channels", StreamChannel.DEFAULT_FULL)
+            if channels == StreamChannel.NONE:
+                channels = StreamChannel.QUAT
+            if self._sensor is not None and hasattr(self._sensor, "set_subscriptions"):
+                self._sensor.set_subscriptions(channels)
+            return channels
+
+    def reset_profile(self) -> StreamChannel:
+        """Restore default detector set, washout setting, and full sensor subscriptions."""
+        with self._lock:
+            self._enabled_detectors = None
+            self.config.washout_enabled = self._default_washout_enabled
+            self.frontend.cfg.washout_enabled = self._default_washout_enabled
+            for d in self.detectors:
+                d.reset()
+            default_ch = (
+                StreamChannel.DEFAULT_LEAN
+                if getattr(self._sensor, "sf_profile", "full") == "lean"
+                else StreamChannel.DEFAULT_FULL
+            )
+            if self._sensor is not None and hasattr(self._sensor, "set_subscriptions"):
+                self._sensor.set_subscriptions(default_ch)
+            return default_ch
 
     def register_detector(self, detector: Detector) -> None:
         """Register an additional Detector plug-in without modifying `_process`."""
@@ -349,6 +394,7 @@ class GestureInterpreter:
         """Propagate dynamic `self.config` changes to Frontend and Detectors."""
         cfg = self.config
         self.frontend.cfg.axis_theta_rad = cfg.yaw_offset_rads
+        self.frontend.cfg.washout_enabled = cfg.washout_enabled
         self.frontend.cfg.adapt_gyro_threshold = cfg.gyro_adapt_threshold
         self.frontend.cfg.calibration_seconds = cfg.calibration_seconds
         self.frontend.cfg.calibration_samples = cfg.calibration_samples

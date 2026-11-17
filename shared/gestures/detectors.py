@@ -14,6 +14,7 @@ from typing import List
 
 from shared.gesture_detector import SliceDetector
 from shared.gestures.types import Frame, Gesture, GestureEvent
+from shared.sensor import StreamChannel
 
 # Sign of gy for an UPWARD flick / slice.  Matches SliceDetector ("up" when
 # mean gy < 0) and the legacy flick-to-steer mapping.  Verify with replay data
@@ -34,6 +35,8 @@ class FlickDetector:
     The cooldown is shared by both directions, so the rebound after a
     downward jerk cannot sneak through as an upward flick.
     """
+
+    required_channels = StreamChannel.GYRO
 
     def __init__(self, threshold: float = 200.0, window_s: float = 0.06,
                  cooldown: float = 0.4, name: str = "flick"):
@@ -61,6 +64,8 @@ class FlickDetector:
 
 class SteerDetector:
     """Four-way flick-to-steer: gx → left/right first, else gy → up/down."""
+
+    required_channels = StreamChannel.GYRO
 
     def __init__(self, threshold: float = 160.0, window_s: float = 0.07,
                  cooldown: float = 0.5, name: str = "steer"):
@@ -96,6 +101,8 @@ class SteerDetector:
 class TwistDetector:
     """Rising-edge twist events on smoothed gz with hysteresis."""
 
+    required_channels = StreamChannel.GYRO
+
     def __init__(self, dead_zone: float = 30.0, tau_s: float = 0.05,
                  release_ratio: float = 0.7, name: str = "twist"):
         self.name = name
@@ -126,6 +133,8 @@ class TwistDetector:
 
 class SliceAdapter:
     """Wraps the existing SliceDetector as a plug-in."""
+
+    required_channels = StreamChannel.GYRO
 
     def __init__(self, name: str = "slice"):
         self.name = name

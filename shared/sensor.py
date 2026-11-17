@@ -22,7 +22,8 @@ import queue
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, Callable
+from enum import Flag, auto
+from typing import Optional, Callable, Tuple
 
 from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError
@@ -190,9 +191,39 @@ _CMD_SF_CORR_ACC_EN    = bytes([_MODULE_SENSOR_FUSION, 0x04, 0x01])  # subscribe
 _CMD_SF_CORR_GYRO_EN   = bytes([_MODULE_SENSOR_FUSION, 0x05, 0x01])  # subscribe CORRECTED_GYRO
 _CMD_SF_CORR_ACC_DIS   = bytes([_MODULE_SENSOR_FUSION, 0x04, 0x00])
 _CMD_SF_CORR_GYRO_DIS  = bytes([_MODULE_SENSOR_FUSION, 0x05, 0x00])
+_CMD_SF_LIN_ACC_EN     = bytes([_MODULE_SENSOR_FUSION, 0x0A, 0x01])  # subscribe LINEAR_ACC (0x0A)
+_CMD_SF_LIN_ACC_DIS    = bytes([_MODULE_SENSOR_FUSION, 0x0A, 0x00])  # unsubscribe LINEAR_ACC
 _CMD_SF_PROBE          = bytes([_MODULE_SENSOR_FUSION, 0x80])        # module info probe
 _CMD_SF_READ_CAL_STATE = bytes([_MODULE_SENSOR_FUSION, 0x8B])        # one-shot cal state read (0x80|0x0B)
 _CMD_SF_READ_CAL_DATA  = bytes([_MODULE_SENSOR_FUSION, 0x8C])        # one-shot acc cal data read (0x80|0x0C)
+_CMD_SF_READ_GYRO_CAL_DATA = bytes([_MODULE_SENSOR_FUSION, 0x8D])    # one-shot gyro cal data read (0x80|0x0D)
+
+
+class StreamChannel(Flag):
+    """Selectable sensor data streams for subscription-based BLE streaming."""
+    NONE      = 0
+    ACC       = auto()   # Corrected acc (SF 0x04) or raw acc (0x03)
+    GYRO      = auto()   # Corrected gyro (SF 0x05) or raw gyro (0x13)
+    QUAT      = auto()   # Hardware quaternion (SF 0x07)
+    LIN_ACC   = auto()   # Gravity-removed linear acceleration (SF 0x0A)
+    CAL_STATE = auto()   # Hardware calibration state (SF 0x0B)
+
+    DEFAULT_FULL = ACC | GYRO | QUAT | CAL_STATE
+    DEFAULT_LEAN = GYRO | QUAT | CAL_STATE
+
+
+def _build_sf_output_enable_cmd(channels: StreamChannel) -> bytes:
+    """Build SF OUTPUT_ENABLE command from StreamChannel flags."""
+    mask = 0
+    if StreamChannel.ACC in channels:
+        mask |= 0x01
+    if StreamChannel.GYRO in channels:
+        mask |= 0x02
+    if StreamChannel.QUAT in channels:
+        mask |= 0x08
+    if StreamChannel.LIN_ACC in channels:
+        mask |= 0x40
+    return bytes([_MODULE_SENSOR_FUSION, 0x03, mask, 0x00])
 
 # Scale factors (raw int16 → physical units)
 # BMI160 at ±4 g  → 1 LSB = 4/32768 g ≈ 0.0001221 g
@@ -226,6 +257,11 @@ class IMUSample:
     hw_qx: float = 0.0
     hw_qy: float = 0.0
     hw_qz: float = 0.0
+    # Hardware linear acceleration (LINEAR_ACC 0x0A, gravity-removed, g).
+    lin_ax: float = 0.0
+    lin_ay: float = 0.0
+    lin_az: float = 0.0
+    hw_lin_acc_valid: bool = False
 
 
 class MetaMotionSensor:
@@ -249,10 +285,22 @@ class MetaMotionSensor:
         sensor.stop_background()
     """
 
-    def __init__(self, scan_timeout: float = 10.0, sf_profile: str = "full"):
+    def __init__(
+        self,
+        scan_timeout: float = 10.0,
+        sf_profile: str = "full",
+        subscriptions: Optional[StreamChannel] = None,
+    ):
         self.scan_timeout   = scan_timeout
         # "full" = quaternion + corrected acc + gyro; "lean" = quaternion + gyro
         self.sf_profile     = sf_profile if sf_profile in ("full", "lean") else "full"
+        if subscriptions is not None:
+            self._subscriptions = subscriptions
+        elif self.sf_profile == "lean":
+            self._subscriptions = StreamChannel.DEFAULT_LEAN
+        else:
+            self._subscriptions = StreamChannel.DEFAULT_FULL
+        self._active_subscriptions: StreamChannel = StreamChannel.NONE
         self.data_queue: queue.Queue[IMUSample] = queue.Queue(maxsize=256)
         self._client: Optional[BleakClient] = None
         self._connected     = False
@@ -261,6 +309,8 @@ class MetaMotionSensor:
         self._thread: Optional[threading.Thread] = None
         self._last_acc      = (0.0, 0.0, 0.0)
         self._last_gyro     = (0.0, 0.0, 0.0)
+        self._last_lin_acc  = (0.0, 0.0, 0.0)
+        self._hw_lin_acc_valid: bool = False
         self._on_sample_cb: Optional[Callable[[IMUSample], None]] = None
         self._notify_count  = 0
         self._sample_count  = 0
@@ -270,13 +320,17 @@ class MetaMotionSensor:
         # Counters for module-specific notifications
         self._acc_notify_count = 0
         self._gyro_notify_count = 0
+        self._lin_acc_notify_count = 0
         # Dirty flags for raw fallback double-emit fix (2a):
         # _emit_sample() is only called when BOTH acc and gyro have been updated.
         self._acc_dirty: bool = False
         self._gyro_dirty: bool = False
-        # BMM150 magnetometer calibration state (0 = uncalibrated, 3 = fully calibrated)
+        # Hardware calibration states (0 = uncalibrated, 3 = fully calibrated)
+        self._accel_cal_state: int = 0
+        self._gyro_cal_state: int = 0
         self._mag_cal_state: int = 0
         self._pending_cal_data: bytes = b''
+        self._pending_gyro_cal_data: bytes = b''
         # Bosch Kalman Filter hardware fusion state
         self._last_euler: tuple = (0.0, 0.0, 0.0, 0.0)  # (heading, pitch, roll, yaw)
         self._hw_fusion_valid: bool = False
@@ -324,6 +378,39 @@ class MetaMotionSensor:
     def set_sample_callback(self, cb: Callable[[IMUSample], None]) -> None:
         """Optional callback invoked on every sample (runs in BLE thread)."""
         self._on_sample_cb = cb
+
+    @property
+    def subscriptions(self) -> StreamChannel:
+        """Currently requested StreamChannel flags."""
+        return self._subscriptions
+
+    def set_subscriptions(self, channels: StreamChannel) -> None:
+        """Update active sensor stream subscriptions (safe to call from main thread)."""
+        if channels == self._subscriptions:
+            return
+        self._subscriptions = channels
+        if self._streaming and self._connected and self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._async_apply_subscriptions(channels), self._loop
+                )
+            except Exception as e:
+                logger.warning("set_subscriptions scheduling failed: %s", e)
+
+    @property
+    def cal_state(self) -> Tuple[int, int, int]:
+        """Hardware calibration levels (accel, gyro, mag), each 0..3."""
+        return (self._accel_cal_state, self._gyro_cal_state, self._mag_cal_state)
+
+    @property
+    def accel_cal_state(self) -> int:
+        """Accelerometer hardware calibration state: 0 = uncalibrated, 3 = fully calibrated."""
+        return self._accel_cal_state
+
+    @property
+    def gyro_cal_state(self) -> int:
+        """Gyroscope hardware calibration state: 0 = uncalibrated, 3 = fully calibrated."""
+        return self._gyro_cal_state
 
     @property
     def mag_cal_state(self) -> int:
@@ -624,6 +711,7 @@ class MetaMotionSensor:
         await asyncio.sleep(0.15)
         self._acc_notify_count  = 0
         self._gyro_notify_count = 0
+        self._lin_acc_notify_count = 0
         self._sf_notify_count   = 0
         self._quat_notify_count = 0
 
@@ -649,14 +737,20 @@ class MetaMotionSensor:
                 await _send(label, payload)
                 await asyncio.sleep(0.12)
 
-            out_en = _CMD_SF_OUTPUT_ENABLE_LEAN if self.sf_profile == "lean" else _CMD_SF_OUTPUT_ENABLE
+            channels = self._subscriptions
+            out_en = _build_sf_output_enable_cmd(channels)
             sf_steps = [("SF_MODE", _CMD_SF_MODE, 0.35)]
-            if self.sf_profile == "full":
+            if StreamChannel.ACC in channels:
                 sf_steps.append(("SF_CORR_ACC_EN", _CMD_SF_CORR_ACC_EN, 0.15))
+            if StreamChannel.GYRO in channels:
+                sf_steps.append(("SF_CORR_GYRO_EN", _CMD_SF_CORR_GYRO_EN, 0.15))
+            if StreamChannel.QUAT in channels:
+                sf_steps.append(("SF_QUAT_EN", _CMD_SF_QUAT_EN, 0.15))
+            if StreamChannel.LIN_ACC in channels:
+                sf_steps.append(("SF_LIN_ACC_EN", _CMD_SF_LIN_ACC_EN, 0.15))
+            if StreamChannel.CAL_STATE in channels:
+                sf_steps.append(("SF_CAL_EN", _CMD_SF_CAL_EN, 0.15))
             sf_steps += [
-                ("SF_CORR_GYRO_EN",  _CMD_SF_CORR_GYRO_EN, 0.15),  # subscribe corrected gyro (0x05)
-                ("SF_QUAT_EN",       _CMD_SF_QUAT_EN,      0.15),  # subscribe quaternion     (0x07)
-                ("SF_CAL_EN",        _CMD_SF_CAL_EN,       0.15),  # subscribe cal state      (0x0B)
                 ("SF_OUTPUT_ENABLE", out_en,               0.15),  # enable SF output mask    (0x03)
                 ("SF_START",         _CMD_SF_START,        0.50),  # start fusion             (0x01)
             ]
@@ -687,20 +781,24 @@ class MetaMotionSensor:
         if sf_available:
             self._streaming = True
             self._using_sf  = True
-            logger.info("Streaming started (sensor fusion).")
-            logger.debug("SF streaming started — waiting for corrected acc data…")
+            self._active_subscriptions = self._subscriptions
+            logger.info("Streaming started (sensor fusion, channels=%s).", self._subscriptions)
+            logger.debug("SF streaming started — waiting for SF data…")
             for _ in range(20):        # up to 4 s
                 await asyncio.sleep(0.2)
-                if self._acc_notify_count > 0 or self._quat_notify_count > 0 or self._sf_notify_count > 0:
-                    logger.info("SF data flowing — acc=%d quat=%d euler=%d cal=%d",
-                                self._acc_notify_count, self._quat_notify_count,
-                                self._sf_notify_count, self._mag_cal_state)
+                if (self._acc_notify_count > 0 or self._gyro_notify_count > 0
+                        or self._quat_notify_count > 0 or self._lin_acc_notify_count > 0
+                        or self._sf_notify_count > 0):
+                    logger.info("SF data flowing — acc=%d gyro=%d quat=%d lin_acc=%d cal=%s",
+                                self._acc_notify_count, self._gyro_notify_count,
+                                self._quat_notify_count, self._lin_acc_notify_count,
+                                self.cal_state)
                     return
             logger.warning("No SF data after 4s (acc=%d quat=%d) — falling back to raw",
                            self._acc_notify_count, self._quat_notify_count)
             # Clean up failed SF attempt
             for p in [_CMD_SF_OUTPUT_DISABLE, _CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
-                      _CMD_SF_QUAT_DIS, _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP]:
+                      _CMD_SF_QUAT_DIS, _CMD_SF_LIN_ACC_DIS, _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP]:
                 try: await self._client.write_gatt_char(METAWEAR_COMMAND_CHAR_UUID, p, response=False)
                 except Exception: pass
             self._using_sf = False
@@ -761,7 +859,7 @@ class MetaMotionSensor:
         # 2. Stop both SF and raw sensor streams
         for payload in [
             _CMD_SF_OUTPUT_DISABLE, _CMD_SF_CORR_ACC_DIS, _CMD_SF_CORR_GYRO_DIS,
-            _CMD_SF_QUAT_DIS, _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP,
+            _CMD_SF_QUAT_DIS, _CMD_SF_LIN_ACC_DIS, _CMD_SF_EULER_DIS, _CMD_SF_CAL_DIS, _CMD_SF_STOP,
             _CMD_ACC_STOP, _CMD_ACC_UNSUB, _CMD_ACC_DATA_UNSUB,
             _CMD_GYRO_STOP, _CMD_GYRO_UNSUB, _CMD_GYRO_DATA_UNSUB, _CMD_GYRO_DATA_UNSUB_270,
             _CMD_LED_STOP,
@@ -825,16 +923,63 @@ class MetaMotionSensor:
         except Exception as e:
             logger.warning("write failed (%s): %s", payload.hex(), e)
 
+    async def _async_apply_subscriptions(self, channels: StreamChannel) -> None:
+        """Dynamically enable/disable BLE GATT stream subscriptions while connected."""
+        if not self._client or not self._connected:
+            return
+        write = self._client.write_gatt_char
+        if self._using_sf:
+            sf_map = [
+                (StreamChannel.ACC,       _CMD_SF_CORR_ACC_EN,  _CMD_SF_CORR_ACC_DIS),
+                (StreamChannel.GYRO,      _CMD_SF_CORR_GYRO_EN, _CMD_SF_CORR_GYRO_DIS),
+                (StreamChannel.QUAT,      _CMD_SF_QUAT_EN,      _CMD_SF_QUAT_DIS),
+                (StreamChannel.LIN_ACC,   _CMD_SF_LIN_ACC_EN,   _CMD_SF_LIN_ACC_DIS),
+                (StreamChannel.CAL_STATE, _CMD_SF_CAL_EN,       _CMD_SF_CAL_DIS),
+            ]
+            # Disable unused SF outputs first, then update individual notify registers, then enable mask.
+            try:
+                await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_OUTPUT_DISABLE, response=True)
+                for flag, en_cmd, dis_cmd in sf_map:
+                    cmd = en_cmd if flag in channels else dis_cmd
+                    await write(METAWEAR_COMMAND_CHAR_UUID, cmd, response=True)
+                    await asyncio.sleep(0.03)
+                await write(METAWEAR_COMMAND_CHAR_UUID, _build_sf_output_enable_cmd(channels), response=True)
+                self._active_subscriptions = channels
+                logger.info("Updated SF subscriptions → %s", channels)
+            except Exception as e:
+                logger.warning("_async_apply_subscriptions (SF) failed: %s", e)
+        else:
+            # Raw fallback: toggle ACC (0x03) and GYRO (0x13)
+            try:
+                if StreamChannel.ACC in channels:
+                    for p in (_CMD_ACC_CONFIG, _CMD_ACC_DATA_SUB, _CMD_ACC_SUBSCRIBE, _CMD_ACC_START):
+                        await write(METAWEAR_COMMAND_CHAR_UUID, p, response=True)
+                else:
+                    for p in (_CMD_ACC_STOP, _CMD_ACC_UNSUB, _CMD_ACC_DATA_UNSUB):
+                        await write(METAWEAR_COMMAND_CHAR_UUID, p, response=False)
+
+                if StreamChannel.GYRO in channels:
+                    for p in (_CMD_GYRO_CONFIG, _CMD_GYRO_DATA_SUB, _CMD_GYRO_DATA_SUB_270,
+                              _CMD_GYRO_SUBSCRIBE, _CMD_GYRO_START):
+                        await write(METAWEAR_COMMAND_CHAR_UUID, p, response=True)
+                else:
+                    for p in (_CMD_GYRO_STOP, _CMD_GYRO_UNSUB, _CMD_GYRO_DATA_UNSUB, _CMD_GYRO_DATA_UNSUB_270):
+                        await write(METAWEAR_COMMAND_CHAR_UUID, p, response=False)
+                self._active_subscriptions = channels
+                logger.info("Updated raw subscriptions → %s", channels)
+            except Exception as e:
+                logger.warning("_async_apply_subscriptions (raw) failed: %s", e)
+
     async def _async_save_calibration(self) -> None:
-        """Read current sensor-fusion cal data via BLE, then write it back to NVM."""
+        """Read current sensor-fusion acc & gyro cal data via BLE, then write them to NVM."""
         if not self._client or not self._connected:
             return
         try:
+            # 1. Accelerometer calibration data (reg 0x0C)
             self._pending_cal_data = b''
             await self._client.write_gatt_char(
                 METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_READ_CAL_DATA, response=True
             )
-            # Wait up to 500 ms for the notification containing the cal bytes
             for _ in range(10):
                 await asyncio.sleep(0.05)
                 if self._pending_cal_data:
@@ -844,9 +989,27 @@ class MetaMotionSensor:
                 await self._client.write_gatt_char(
                     METAWEAR_COMMAND_CHAR_UUID, nvm_cmd, response=True
                 )
-                logger.info("Calibration saved to NVM (%d bytes)", len(self._pending_cal_data))
+                logger.info("Acc calibration saved to NVM (%d bytes)", len(self._pending_cal_data))
             else:
-                logger.warning("No calibration data received — NVM save skipped")
+                logger.warning("No acc calibration data received — NVM save skipped")
+
+            # 2. Gyroscope calibration data (reg 0x0D)
+            self._pending_gyro_cal_data = b''
+            await self._client.write_gatt_char(
+                METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_READ_GYRO_CAL_DATA, response=True
+            )
+            for _ in range(10):
+                await asyncio.sleep(0.05)
+                if self._pending_gyro_cal_data:
+                    break
+            if self._pending_gyro_cal_data:
+                nvm_gyro_cmd = bytes([_MODULE_SENSOR_FUSION, 0x0D]) + self._pending_gyro_cal_data
+                await self._client.write_gatt_char(
+                    METAWEAR_COMMAND_CHAR_UUID, nvm_gyro_cmd, response=True
+                )
+                logger.info("Gyro calibration saved to NVM (%d bytes)", len(self._pending_gyro_cal_data))
+            else:
+                logger.warning("No gyro calibration data received — NVM save skipped")
         except Exception as e:
             logger.warning("_async_save_calibration failed: %s", e)
 
@@ -901,10 +1064,15 @@ class MetaMotionSensor:
         elif module == _MODULE_SENSOR_FUSION and reg == 0x08:   # EULER_ANGLES
             self._sf_notify_count += 1
             self._parse_sf_euler(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x0A:   # LINEAR_ACC
+            self._lin_acc_notify_count += 1
+            self._parse_sf_lin_acc(data[2:])
         elif module == _MODULE_SENSOR_FUSION and reg == 0x0B:   # CALIBRATION_STATE
             self._parse_cal_state(data[2:])
         elif module == _MODULE_SENSOR_FUSION and reg == 0x0C:   # ACC_CAL_DATA (NVM read response)
             self._parse_cal_data(data[2:])
+        elif module == _MODULE_SENSOR_FUSION and reg == 0x0D:   # GYRO_CAL_DATA (NVM read response)
+            self._parse_gyro_cal_data(data[2:])
         else:
             # Other notifications (module-info, etc.) are logged above.
             pass
@@ -933,6 +1101,19 @@ class MetaMotionSensor:
             self._emit_sample()
             self._gyro_dirty = False
 
+    def _should_emit_on(self, channel: StreamChannel) -> bool:
+        """Pick one deterministic clock channel among active SF subscriptions."""
+        subs = self._subscriptions
+        if StreamChannel.ACC in subs:
+            return channel is StreamChannel.ACC
+        if StreamChannel.QUAT in subs:
+            return channel is StreamChannel.QUAT
+        if StreamChannel.GYRO in subs:
+            return channel is StreamChannel.GYRO
+        if StreamChannel.LIN_ACC in subs:
+            return channel is StreamChannel.LIN_ACC
+        return False
+
     def _parse_sf_corrected_acc(self, payload: bytearray) -> None:
         """Parse SF CORRECTED_ACC: MblMwCorrectedCartesianFloat = 3×float32 + uint8 accuracy."""
         if len(payload) < 12:
@@ -944,7 +1125,8 @@ class MetaMotionSensor:
         if mag_sq > 16.0:
             x /= 9.80665; y /= 9.80665; z /= 9.80665
         self._last_acc = (x, y, z)
-        self._emit_sample()
+        if self._should_emit_on(StreamChannel.ACC):
+            self._emit_sample()
 
     def _parse_sf_corrected_gyro(self, payload: bytearray) -> None:
         """Parse SF CORRECTED_GYRO: MblMwCorrectedCartesianFloat = 3×float32 + uint8 accuracy."""
@@ -952,7 +1134,19 @@ class MetaMotionSensor:
             return
         gx, gy, gz = struct.unpack_from('<fff', payload[:12])
         self._last_gyro = (gx, gy, gz)
-        if self._acc_notify_count == 0:
+        if self._should_emit_on(StreamChannel.GYRO):
+            self._emit_sample()
+
+    def _parse_sf_lin_acc(self, payload: bytearray) -> None:
+        """Parse SF LINEAR_ACC (0x0A): 3×float32 (g or m/s²)."""
+        if len(payload) < 12:
+            return
+        lx, ly, lz = struct.unpack_from('<fff', payload[:12])
+        if (lx*lx + ly*ly + lz*lz) > 16.0:
+            lx /= 9.80665; ly /= 9.80665; lz /= 9.80665
+        self._last_lin_acc = (lx, ly, lz)
+        self._hw_lin_acc_valid = True
+        if self._should_emit_on(StreamChannel.LIN_ACC):
             self._emit_sample()
 
     def _parse_sf_quat(self, payload: bytearray) -> None:
@@ -973,13 +1167,14 @@ class MetaMotionSensor:
         yaw = math.degrees(math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
         heading = yaw % 360.0
         self._last_euler = (heading, pitch, roll, yaw)
-        if self._acc_notify_count == 0:
-            # Lean profile: synthesise gravity vector from the quaternion
+        if StreamChannel.ACC not in self._subscriptions or self._acc_notify_count == 0:
+            # Lean / quat-only profile: synthesise gravity vector from the quaternion
             self._last_acc = (
                 2.0 * (x * z - w * y),
                 2.0 * (w * x + y * z),
                 1.0 - 2.0 * (x * x + y * y),
             )
+        if self._should_emit_on(StreamChannel.QUAT):
             self._emit_sample()
         if self._quat_notify_count <= 5 or self._quat_notify_count % 500 == 0:
             logger.debug("SF quat #%d  q=(%+.3f,%+.3f,%+.3f,%+.3f)  roll=%.1f° pitch=%.1f°",
@@ -1013,20 +1208,28 @@ class MetaMotionSensor:
         accel_cal = int(payload[0]) & 0x03
         gyro_cal  = int(payload[1]) & 0x03
         mag_cal   = int(payload[2]) & 0x03
-        old = self._mag_cal_state
+        old = (self._accel_cal_state, self._gyro_cal_state, self._mag_cal_state)
+        self._accel_cal_state = accel_cal
+        self._gyro_cal_state = gyro_cal
         self._mag_cal_state = mag_cal
-        if mag_cal != old:
-            logger.info("Mag cal: %d→%d  (accel=%d gyro=%d)", old, mag_cal, accel_cal, gyro_cal)
+        if (accel_cal, gyro_cal, mag_cal) != old:
+            logger.info("Cal state: acc=%d gyro=%d mag=%d", accel_cal, gyro_cal, mag_cal)
 
     def _parse_cal_data(self, payload: bytearray) -> None:
-        """Store raw calibration offset bytes received after a read-data request."""
+        """Store raw acc calibration offset bytes received after a read-data request."""
         self._pending_cal_data = bytes(payload)
-        logger.debug("Cal data received (%d bytes)", len(payload))
+        logger.debug("Acc cal data received (%d bytes)", len(payload))
+
+    def _parse_gyro_cal_data(self, payload: bytearray) -> None:
+        """Store raw gyro calibration offset bytes received after a read-data request."""
+        self._pending_gyro_cal_data = bytes(payload)
+        logger.debug("Gyro cal data received (%d bytes)", len(payload))
 
     def _emit_sample(self) -> None:
         now = time.monotonic()
         ax, ay, az = self._last_acc
         gx, gy, gz = self._last_gyro
+        lx, ly, lz = self._last_lin_acc
         hw_heading, hw_pitch, hw_roll, _ = self._last_euler
         hw_qw, hw_qx, hw_qy, hw_qz = self._last_quat
         sample = IMUSample(
@@ -1038,6 +1241,8 @@ class MetaMotionSensor:
             hw_roll=hw_roll,
             hw_fusion_valid=self._hw_fusion_valid,
             hw_qw=hw_qw, hw_qx=hw_qx, hw_qy=hw_qy, hw_qz=hw_qz,
+            lin_ax=lx, lin_ay=ly, lin_az=lz,
+            hw_lin_acc_valid=self._hw_lin_acc_valid,
         )
         self._sample_count += 1
         self._update_rate_stats(now)
