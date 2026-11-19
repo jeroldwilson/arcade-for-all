@@ -442,18 +442,16 @@ def main() -> None:
     from games.bricks.game         import BricksGame
     from games.snake.game          import SnakeGame
     from games.fruit_ninja.game    import FruitNinjaGame
-    from games.scratch_pad.game    import ScratchPadGame
     from games.math_choice.game    import MathChoiceGame
-    from games.villain_slicer.game import VillainSlicerGame
     from games.youtube_tv.game     import YouTubeTVGame
+    from games.plot_3d.game        import Plot3DGame
 
     GAME_REGISTRY = {
+        "plot_3d":        Plot3DGame,
         "youtube_tv":     YouTubeTVGame,
-        "villain_slicer": VillainSlicerGame,
         "bricks":         BricksGame,
         "snake":          SnakeGame,
         "fruit_ninja":    FruitNinjaGame,
-        "scratch_pad":    ScratchPadGame,
         "math_choice":    MathChoiceGame,
     }
 

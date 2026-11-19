@@ -12,14 +12,12 @@ from shared.gestures.types import Gesture, GestureEvent, Signals
 
 # Gesture legends displayed on the Home screen for each game (Phase 6)
 GAME_GESTURE_LEGENDS: Dict[str, str] = {
+    "plot_3d":        "Gestures: Move Hand from Center (0,0,0) → 3D Ribbon  |  Arrow Keys → Rotate View",
     "bricks":         "Gestures: Tilt L/R → Paddle  |  Flick Up / Hold Up → Launch  |  Twist → Spin",
     "snake":          "Gestures: Tilt or Flick/Hold 4-Way → Turn Snake",
     "fruit_ninja":    "Gestures: Orientation Pointer → Move Blade  |  Slice / Flick / Hold → Cut",
-    "villain_slicer": "Gestures: Orientation Pointer → Move Katana  |  Flick Up / Hold Up → Ultimate",
     "math_choice":    "Gestures: Tilt or Flick/Hold L/R → Pick Answer",
     "youtube_tv":     "Gestures: Flick/Hold L/R → Channel  |  Hold/Flick Up → Play/Pause",
-    "scratch_pad":    "Gestures: Tilt → Aim Brush  |  Flick Up / Hold → Clear Canvas",
-    "magic_wand":     "Gestures: Tilt → Move Wand  |  Flick Up / Hold → Cast Spell",
     "calibration":    "Gestures: Live 4-Panel IMU & Quaternion Visualizer",
 }
 

@@ -128,6 +128,23 @@ class TestSensorSubscriptionAndParsing(unittest.TestCase):
         self.assertIn(bytes([_MODULE_SENSOR_FUSION, 0x0C, 1, 2, 3, 4]), written)
         self.assertIn(bytes([_MODULE_SENSOR_FUSION, 0x0D, 5, 6, 7, 8]), written)
 
+    def test_set_sf_mode_toggles_imuplus_and_ndof_bytes(self):
+        sensor = MetaMotionSensor(sf_mode="imuplus")
+        sensor._connected = True
+        sensor._using_sf = True
+        mock_client = MagicMock()
+        mock_client.write_gatt_char = AsyncMock()
+        sensor._client = mock_client
+
+        asyncio.run(sensor._async_set_sf_mode("ndof"))
+        written_ndof = [c.args[1] for c in mock_client.write_gatt_char.call_args_list]
+        self.assertIn(bytes([_MODULE_SENSOR_FUSION, 0x02, 0x01, 0x31]), written_ndof)
+
+        mock_client.write_gatt_char.reset_mock()
+        asyncio.run(sensor._async_set_sf_mode("imuplus"))
+        written_imu = [c.args[1] for c in mock_client.write_gatt_char.call_args_list]
+        self.assertIn(bytes([_MODULE_SENSOR_FUSION, 0x02, 0x02, 0x31]), written_imu)
+
 
 if __name__ == "__main__":
     unittest.main()

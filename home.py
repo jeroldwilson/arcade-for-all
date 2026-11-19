@@ -39,20 +39,20 @@ TEXT_CLR   = (255, 255, 255)
 DIM_CLR    = (165, 165, 180)
 CARD_BG    = (30,  30,  52)
 
-GAMES = ["youtube_tv", "math_choice", "fruit_ninja", "bricks", "snake", "villain_slicer", "scratch_pad"]   # calibration & magic_wand added dynamically
+GAMES = ["plot_3d", "youtube_tv", "math_choice", "fruit_ninja", "bricks", "snake"]   # calibration added dynamically
 
 GAME_META = {
+    "plot_3d": {
+        "title":   "3D PLOTTER",
+        "desc":    ["3D sensor movement plane!", "Dual-color 3D ribbon trail.", "Arrow keys rotate 3D view."],
+        "desc_ac": ["3D sensor movement plane!", "Starts centered at (0,0,0).", "Returns to center at rest."],
+        "accent":  (0, 240, 255),
+    },
     "youtube_tv": {
         "title":   "YOUTUBE TV",
         "desc":    ["Watch YouTube on HDMI TV!", "Swipe Left/Right for videos.", "Parent URL setup, zero tokens!"],
         "desc_ac": ["Watch YouTube independently!", "Swipe or tilt Left / Right!", "Voice announces every channel!"],
         "accent":  (255, 70, 90),
-    },
-    "villain_slicer": {
-        "title":   "VILLAIN SLICER",
-        "desc":    ["Slice cartoon villains!", "Cyber sword gesture slashes.", "Flick up for Omega Slash!"],
-        "desc_ac": ["Slice cartoon villains!", "Dwell or slice to defeat!", "Flick up for Super Strike!"],
-        "accent":  (255, 60, 140),
     },
     "fruit_ninja": {
         "title":   "FRUIT SLICE",
@@ -72,23 +72,11 @@ GAME_META = {
         "desc_ac": ["Eat food, grow longer!", "Move wrist — snake finds the way!", "Walls wrap, no game over!"],
         "accent":  (100, 240, 120),
     },
-    "magic_wand": {
-        "title":   "MAGIC WAND",
-        "desc":    ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
-        "desc_ac": ["A fun way to learn gestures.", "Move the wand to the orbs.", "Sensor required."],
-        "accent":  (220, 120, 255),
-    },
     "calibration": {
         "title":   "CALIBRATE",
         "desc":    ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
         "desc_ac": ["Live sensor orientation.", "Pitch · Roll · Yaw view.", "Sensor required."],
         "accent":  (255, 170, 50),
-    },
-    "scratch_pad": {
-        "title":   "SCRATCH PAD",
-        "desc":    ["Draw with your sensor!", "Flick to toggle pen.", "Test ML gesture models."],
-        "desc_ac": ["Draw with your sensor!", "Flick to toggle pen.", "Test ML gesture models."],
-        "accent":  (200, 150, 255),
     },
     "math_choice": {
         "title":   "CYBER MATH",
@@ -595,7 +583,9 @@ class HomeScreen:
         pygame.draw.rect(self._screen, (10, 10, 20), area, border_radius=6)
         dim = 180 if active else 100
 
-        if game_id == "youtube_tv":
+        if game_id == "plot_3d":
+            self._draw_plot_3d_preview(area, dim)
+        elif game_id == "youtube_tv":
             self._draw_youtube_tv_preview(area, dim)
         elif game_id == "math_choice":
             self._draw_math_choice_preview(area, dim)
@@ -605,10 +595,6 @@ class HomeScreen:
             self._draw_snake_preview(area, dim)
         elif game_id == "fruit_ninja":
             self._draw_fruit_ninja_preview(area, dim)
-        elif game_id == "villain_slicer":
-            self._draw_villain_slicer_preview(area, dim)
-        elif game_id == "scratch_pad":
-            self._draw_scratch_pad_preview(area, dim)
 
         self._screen.set_clip(prev_clip)
 
@@ -750,47 +736,32 @@ class HomeScreen:
         pygame.draw.circle(self._screen, _c(0, 235, 255), (turret_x, turret_y), dome_r, max(1, int(2 * sc)))
         pygame.draw.circle(self._screen, _c(255, 230, 75), (turret_x, turret_y), max(2, int(4 * sc)))
 
-    def _draw_villain_slicer_preview(self, area: pygame.Rect, dim: int) -> None:
-        """Render a mini cartoon villain + neon cyber slash preview."""
+    def _draw_plot_3d_preview(self, area: pygame.Rect, dim: int) -> None:
+        """Render a rotating 3D axis + dual-colored ribbon arc preview."""
         sc = self._sc
         fade = dim / 255.0
+        t = pygame.time.get_ticks() / 1000.0
 
         def _c(r: int, g: int, b: int) -> Tuple[int, int, int]:
             return (min(255, int(r * fade)), min(255, int(g * fade)), min(255, int(b * fade)))
 
-        cx, cy = area.centerx, area.centery
-        r = max(10, int(22 * sc))
-        pygame.draw.circle(self._screen, _c(140, 60, 220), (cx, cy), r)
-        pygame.draw.circle(self._screen, _c(255, 60, 140), (cx, cy), r, max(1, int(2 * sc)))
-        # Glowing eyes
-        pygame.draw.circle(self._screen, _c(255, 230, 50), (cx - int(7 * sc), cy - int(3 * sc)), max(2, int(3 * sc)))
-        pygame.draw.circle(self._screen, _c(255, 230, 50), (cx + int(7 * sc), cy - int(3 * sc)), max(2, int(3 * sc)))
-        # Diagonal plasma slash
-        pygame.draw.line(
-            self._screen, _c(0, 240, 255),
-            (area.left + int(area.width * 0.2), area.bottom - int(area.height * 0.2)),
-            (area.right - int(area.width * 0.2), area.top + int(area.height * 0.2)),
-            max(2, int(3 * sc)),
-        )
+        cx, cy = area.centerx, area.centery + int(4 * sc)
+        # Mini 3D axes
+        pygame.draw.line(self._screen, _c(255, 95, 95), (cx, cy), (cx + int(22 * sc), cy + int(8 * sc)), 2)
+        pygame.draw.line(self._screen, _c(95, 240, 140), (cx, cy), (cx - int(18 * sc), cy + int(8 * sc)), 2)
+        pygame.draw.line(self._screen, _c(90, 180, 255), (cx, cy), (cx, cy - int(22 * sc)), 2)
 
-    def _draw_scratch_pad_preview(self, area: pygame.Rect, dim: int) -> None:
-        sc = self._sc
-        alpha = dim
-        cx = area.centerx
-        cy = area.centery
-        t = pygame.time.get_ticks() / 1000.0
-        r = int(15 * sc)
-        x = cx + int(math.cos(t * 2) * r)
-        y = cy + int(math.sin(t * 3) * r)
-        
-        # draw a simple squiggle line
-        pts = []
-        for i in range(20):
-            pt_t = t - (i * 0.05)
-            pts.append((cx + int(math.cos(pt_t * 2) * r), cy + int(math.sin(pt_t * 3) * r)))
-            
-        pygame.draw.lines(self._screen, (min(255, 150*alpha//255), min(255, 100*alpha//255), min(255, 255*alpha//255)), False, pts, int(3 * sc))
-        pygame.draw.circle(self._screen, (min(255, 200*alpha//255), min(255, 150*alpha//255), min(255, 255*alpha//255)), (x, y), int(5 * sc))
+        # Dual-colored 3D ribbon curve
+        pts_l, pts_r = [], []
+        for i in range(18):
+            a = t * 1.5 - i * 0.14
+            px = cx + int(math.sin(a) * 24 * sc)
+            py = cy - int((math.cos(a * 0.7) * 14 + 4) * sc)
+            pts_l.append((px - 2, py - 2))
+            pts_r.append((px + 2, py + 2))
+        pygame.draw.lines(self._screen, _c(0, 240, 255), False, pts_l, 2)
+        pygame.draw.lines(self._screen, _c(255, 75, 175), False, pts_r, 2)
+        pygame.draw.circle(self._screen, _c(255, 235, 90), pts_l[0], max(3, int(4 * sc)))
 
     def _draw_bricks_preview(self, area: pygame.Rect, dim: int) -> None:
         sc = self._sc

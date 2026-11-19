@@ -69,6 +69,16 @@ class DualSensorHub:
     def mag_cal_state(self) -> int:
         return self.wrist.mag_cal_state
 
+    @property
+    def sf_mode(self) -> str:
+        return getattr(self.wrist, "sf_mode", "imuplus")
+
+    def set_sf_mode(self, mode: str) -> None:
+        if hasattr(self.wrist, "set_sf_mode"):
+            self.wrist.set_sf_mode(mode)
+        if self.upper_arm is not None and self.upper_arm.is_connected() and hasattr(self.upper_arm, "set_sf_mode"):
+            self.upper_arm.set_sf_mode(mode)
+
     def is_connected(self) -> bool:
         return self.wrist.is_connected()
 

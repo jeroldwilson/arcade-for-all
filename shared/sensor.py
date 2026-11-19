@@ -169,8 +169,14 @@ _MODULE_SENSOR_FUSION  = 0x19
 # 0x31 = acc=±4G (lower=1), gyro=±500dps (upper=3, enum=2, written as 3=enum+1)
 # Mode 0x02 = IMUPlus (6-axis acc+gyro).  NDoF (0x01) adds the magnetometer, which
 # indoor metal / laptops / wheelchairs corrupt — see docs/v1.0-raodmap.md §2.
+_SF_MODE_NDOF          = 0x01
 _SF_MODE_IMUPLUS       = 0x02
 _CMD_SF_MODE           = bytes([_MODULE_SENSOR_FUSION, 0x02, _SF_MODE_IMUPLUS, 0x31])  # IMUPlus, acc±4G, gyro±500dps
+
+
+def _build_sf_mode_cmd(sf_mode: str) -> bytes:
+    mode_byte = _SF_MODE_NDOF if sf_mode == "ndof" else _SF_MODE_IMUPLUS
+    return bytes([_MODULE_SENSOR_FUSION, 0x02, mode_byte, 0x31])
 # OUTPUT_ENABLE mask bits: CORRECTED_ACC=0x01 CORRECTED_GYRO=0x02 CORRECTED_MAG=0x04
 #                          QUATERNION=0x08 EULER=0x10 GRAVITY=0x20 LINEAR_ACC=0x40
 # "full" profile: quaternion + corrected acc + corrected gyro (3 streams, same load as before)
@@ -290,10 +296,12 @@ class MetaMotionSensor:
         scan_timeout: float = 10.0,
         sf_profile: str = "full",
         subscriptions: Optional[StreamChannel] = None,
+        sf_mode: str = "imuplus",
     ):
         self.scan_timeout   = scan_timeout
         # "full" = quaternion + corrected acc + gyro; "lean" = quaternion + gyro
         self.sf_profile     = sf_profile if sf_profile in ("full", "lean") else "full"
+        self._sf_mode       = sf_mode if sf_mode in ("imuplus", "ndof") else "imuplus"
         if subscriptions is not None:
             self._subscriptions = subscriptions
         elif self.sf_profile == "lean":
@@ -378,6 +386,27 @@ class MetaMotionSensor:
     def set_sample_callback(self, cb: Callable[[IMUSample], None]) -> None:
         """Optional callback invoked on every sample (runs in BLE thread)."""
         self._on_sample_cb = cb
+
+    @property
+    def sf_mode(self) -> str:
+        """Current Bosch sensor fusion mode: 'imuplus' (6-axis) or 'ndof' (9-axis)."""
+        return self._sf_mode
+
+    def set_sf_mode(self, mode: str) -> None:
+        """Switch between 'imuplus' (6-axis) and 'ndof' (9-axis) at runtime."""
+        norm = mode.lower().strip()
+        if norm not in ("imuplus", "ndof"):
+            raise ValueError(f"Unsupported sf_mode: {mode!r} (expected 'imuplus' or 'ndof')")
+        if norm == self._sf_mode:
+            return
+        self._sf_mode = norm
+        if self._streaming and self._connected and self._using_sf and self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._async_set_sf_mode(norm), self._loop
+                )
+            except Exception as e:
+                logger.warning("set_sf_mode scheduling failed: %s", e)
 
     @property
     def subscriptions(self) -> StreamChannel:
@@ -739,7 +768,7 @@ class MetaMotionSensor:
 
             channels = self._subscriptions
             out_en = _build_sf_output_enable_cmd(channels)
-            sf_steps = [("SF_MODE", _CMD_SF_MODE, 0.35)]
+            sf_steps = [("SF_MODE", _build_sf_mode_cmd(self._sf_mode), 0.35)]
             if StreamChannel.ACC in channels:
                 sf_steps.append(("SF_CORR_ACC_EN", _CMD_SF_CORR_ACC_EN, 0.15))
             if StreamChannel.GYRO in channels:
@@ -922,6 +951,25 @@ class MetaMotionSensor:
             )
         except Exception as e:
             logger.warning("write failed (%s): %s", payload.hex(), e)
+
+    async def _async_set_sf_mode(self, mode: str) -> None:
+        """Stop SF, write new SF_MODE (IMUPlus vs NDoF), re-enable outputs and restart."""
+        if not self._client or not self._connected or not self._using_sf:
+            return
+        write = self._client.write_gatt_char
+        try:
+            await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_OUTPUT_DISABLE, response=True)
+            await asyncio.sleep(0.05)
+            await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_STOP, response=True)
+            await asyncio.sleep(0.10)
+            await write(METAWEAR_COMMAND_CHAR_UUID, _build_sf_mode_cmd(mode), response=True)
+            await asyncio.sleep(0.20)
+            await write(METAWEAR_COMMAND_CHAR_UUID, _build_sf_output_enable_cmd(self._subscriptions), response=True)
+            await asyncio.sleep(0.05)
+            await write(METAWEAR_COMMAND_CHAR_UUID, _CMD_SF_START, response=True)
+            logger.info("Switched sensor fusion mode → %s", mode)
+        except Exception as e:
+            logger.warning("_async_set_sf_mode failed: %s", e)
 
     async def _async_apply_subscriptions(self, channels: StreamChannel) -> None:
         """Dynamically enable/disable BLE GATT stream subscriptions while connected."""
